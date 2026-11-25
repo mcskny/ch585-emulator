@@ -50,6 +50,15 @@ impl Spi {
     }
 
     #[inline]
+    pub fn next_event_cycles(&self) -> Option<u32> {
+        if self.total_cnt > 0 || !self.fifo.is_empty() {
+            Some(1)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
     pub fn step(&mut self, _cycles: u32, pfic: &mut Pfic, sram: &mut [u8]) {
         self.dma_active_step = false;
         if self.total_cnt == 0 && self.fifo.is_empty() {

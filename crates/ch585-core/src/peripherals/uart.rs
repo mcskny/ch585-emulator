@@ -97,6 +97,28 @@ impl Uart {
     }
 
     #[inline]
+    pub fn next_event_cycles(&self) -> Option<u32> {
+        if self.tx_fifo.is_empty() && self.rx_fifo.is_empty() {
+            return None;
+        }
+        let bit_cycles = ((self.dl.max(1) as u32) * (self.div.max(1) as u32) * 8).max(1);
+        let byte_cycles = (bit_cycles * 10).min(1000);
+        let mut best: Option<u32> = None;
+        if !self.tx_fifo.is_empty() {
+            let c = byte_cycles.saturating_sub(self.tx_cycle_acc).max(1);
+            best = Some(c);
+        }
+        if !self.rx_fifo.is_empty()
+            && self.rx_fifo.len() < self.rx_trig_threshold()
+            && !self.rx_timeout_pending
+        {
+            let c = (byte_cycles * 4).saturating_sub(self.rx_idle_cycles).max(1);
+            best = Some(best.map_or(c, |b| b.min(c)));
+        }
+        best
+    }
+
+    #[inline]
     pub fn step(&mut self, cycles: u32, pfic: &mut Pfic) {
         if self.tx_fifo.is_empty()
             && self.rx_fifo.is_empty()

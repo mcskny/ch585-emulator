@@ -174,6 +174,21 @@ impl Adc {
         }
     }
 
+    /// Advances ADC conversion/auto-trigger timers in O(1) across idle windows before the next sample.
+    #[inline]
+    pub fn advance_idle_cycles(&mut self, cycles: u64) {
+        self.dma_active_step = false;
+        if cycles == 0 {
+            return;
+        }
+        let cyc_u32 = cycles.min(u32::MAX as u64) as u32;
+        if self.converting {
+            self.conv_cycles_rem = self.conv_cycles_rem.saturating_sub(cyc_u32);
+        } else if (self.ctrl_dma & 0x80) != 0 {
+            self.auto_timer = self.auto_timer.saturating_add(cyc_u32);
+        }
+    }
+
     pub fn sample_channel_mv(&self, ch: u8, time_s: f64, gpio: &Gpio) -> i32 {
         if ch < 14 {
             // If GPIO pin has an explicit AnalogMv or High/Low drive, let it override default

@@ -39,7 +39,7 @@ pub mod prelude {
     pub use crate::json::{parse_json, JsonValue};
     pub use crate::peripherals::adc::AdcWaveform;
     pub use crate::peripherals::gpio::{ExtPinDrive, ExtPull, PinElectricState};
-    pub use crate::peripherals::sys::{CurrentTable, PowerMode, PowerReport};
+    pub use crate::peripherals::sys::{CurrentTable, IdleSkipStats, PowerMode, PowerReport};
     pub use crate::profiler::{Profiler, ProfilerReport};
     pub use crate::report::{MachineReport, PerfStats};
     pub use crate::rf::{

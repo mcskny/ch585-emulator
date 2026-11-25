@@ -154,6 +154,33 @@ impl Rtc {
         self.advance_ticks(ticks, pfic)
     }
 
+    /// System clock cycles until next enabled RTC wakeup event (0 if already asserted).
+    pub fn next_wakeup_sys_cycles(&self, sys_clk_hz: u32, clk_32k_hz: u32) -> Option<u64> {
+        let ticks = self.next_wakeup_ticks()?;
+        if ticks == 0 {
+            return Some(0);
+        }
+        let fsys = sys_clk_hz.max(32_000) as u128;
+        let k32 = clk_32k_hz.max(1) as u128;
+        let needed = (ticks as u128).saturating_mul(fsys).saturating_sub(self.cycle_acc as u128);
+        Some(needed.div_ceil(k32).max(1) as u64)
+    }
+
+    /// Advance RTC by `sys_cycles` (64-bit) at `sys_clk_hz` in O(1), matching [`Rtc::step`].
+    pub fn step_u64(
+        &mut self,
+        sys_cycles: u64,
+        sys_clk_hz: u32,
+        clk_32k_hz: u32,
+        pfic: &mut Pfic,
+    ) -> bool {
+        let fsys = sys_clk_hz.max(32_000) as u128;
+        let total = (self.cycle_acc as u128) + (sys_cycles as u128) * (clk_32k_hz as u128);
+        let ticks_32k = (total / fsys) as u64;
+        self.cycle_acc = (total % fsys) as u64;
+        self.advance_ticks(ticks_32k, pfic)
+    }
+
     /// Advance RTC by `sys_cycles` at `sys_clk_hz`. Returns `true` if an RTC wakeup event occurred.
     pub fn step(&mut self, sys_cycles: u32, sys_clk_hz: u32, clk_32k_hz: u32, pfic: &mut Pfic) -> bool {
         let fsys = sys_clk_hz.max(32_000) as u64;

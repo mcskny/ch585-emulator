@@ -260,6 +260,105 @@ impl UsbHs {
         (self.ctrl & 0x20) != 0 && (self.ctrl & 0x03) == 0 && (self.pll_ctrl & 0x04) != 0
     }
 
+    fn has_ready_transfer(&self) -> bool {
+        const SRAM_LEN: usize = 128 * 1024;
+        if self.active_req.is_none() {
+            if !self.req_queue.is_empty() {
+                let dma = (self.ep0_dma & 0x1FFFF) as usize;
+                return dma + 8 <= SRAM_LEN && (self.ep_rx_en & 1) != 0;
+            }
+        } else if let Some((_, ref step)) = self.active_req {
+            return match step {
+                ControlReqStep::SendSetup => {
+                    let dma = (self.ep0_dma & 0x1FFFF) as usize;
+                    dma + 8 <= SRAM_LEN && (self.ep_rx_en & 1) != 0
+                }
+                ControlReqStep::DataIn | ControlReqStep::StatusIn => {
+                    matches!(self.ep_tx_ctrl[0] & 0x03, 0x01 | 0x02)
+                }
+                ControlReqStep::DataOut | ControlReqStep::StatusOut => {
+                    matches!(self.ep_rx_ctrl[0] & 0x03, 0x01 | 0x02)
+                }
+                ControlReqStep::WaitAddrSet => self.dev_ad != 0,
+            };
+        }
+
+        if self.enumerated {
+            for ep in 1..8usize {
+                if (self.ep_tx_en & (1 << ep)) != 0
+                    && (self.ep_tx_ctrl[ep] & 0x80) == 0
+                    && (self.ep_tx_ctrl[ep] & 0x03) == 0x02
+                {
+                    return true;
+                }
+                if (self.ep_rx_en & (1 << ep)) != 0
+                    && (self.ep_rx_ctrl[ep] & 0x80) == 0
+                    && (self.ep_rx_ctrl[ep] & 0x03) == 0x02
+                    && !self.out_queues[ep].is_empty()
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Cycles until the next observable USBHS event (reset, transfer, detach, or SOF IRQ).
+    pub fn next_event_cycles(&self, sof_irq_observable: bool) -> Option<u32> {
+        if !self.device_enabled() || !self.host_attached {
+            return if self.bus_reset_sent
+                || self.enumerated
+                || self.suspended
+                || self.active_req.is_some()
+                || !self.req_queue.is_empty()
+            {
+                Some(1)
+            } else {
+                None
+            };
+        }
+        if self.suspended {
+            return None;
+        }
+        let mut best: Option<u32> = None;
+        if sof_irq_observable && (self.int_en & 0x20) != 0 && (self.int_fg & 0x20) == 0 {
+            let sof_c = 7800u32.saturating_sub(self.sof_acc).max(1);
+            best = Some(sof_c);
+        }
+        if !self.bus_reset_sent {
+            let att_c = self.attach_delay.max(1);
+            best = Some(best.map_or(att_c, |b| b.min(att_c)));
+        } else if (self.int_fg & 0x41) == 0 && !self.any_ep_done() && self.has_ready_transfer() {
+            let xfer_c = self.ctrl_cooldown.max(1);
+            best = Some(best.map_or(xfer_c, |b| b.min(xfer_c)));
+        }
+        best
+    }
+
+    /// Advances USBHS SOF/cooldown counters in O(1) while no transfer/reset fires.
+    pub fn advance_idle_cycles(&mut self, cycles: u64, pfic: &mut Pfic) {
+        self.dma_active_step = false;
+        if cycles == 0 || !self.device_enabled() || !self.host_attached || self.suspended {
+            return;
+        }
+        let total = (self.sof_acc as u64).saturating_add(cycles);
+        let wraps = total / 7800;
+        self.sof_acc = (total % 7800) as u32;
+        if wraps > 0 {
+            self.frame_no = self.frame_no.wrapping_add(wraps as u16);
+            if (self.int_en & 0x20) != 0 {
+                self.int_fg |= 0x20;
+            }
+        }
+        let cyc_u32 = cycles.min(u32::MAX as u64) as u32;
+        if !self.bus_reset_sent {
+            self.attach_delay = self.attach_delay.saturating_sub(cyc_u32);
+        } else if (self.int_fg & 0x41) == 0 && !self.any_ep_done() {
+            self.ctrl_cooldown = self.ctrl_cooldown.saturating_sub(cyc_u32);
+        }
+        self.sync_irq(pfic);
+    }
+
     fn any_ep_done(&self) -> bool {
         (0..8).any(|ep| ((self.ep_tx_ctrl[ep] | self.ep_rx_ctrl[ep]) & 0x80) != 0)
     }

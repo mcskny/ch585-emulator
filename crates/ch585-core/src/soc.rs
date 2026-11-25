@@ -17,8 +17,8 @@ use crate::peripherals::pwm::PwmX;
 use crate::peripherals::rtc::Rtc;
 use crate::peripherals::spi::Spi;
 use crate::peripherals::sys::{
-    CurrentTable, FlashCtrl, PeriphTimeNs, PowerMode, PowerReport, SysCtrl, RST_FLAG_MR,
-    RST_FLAG_RPOR, RST_FLAG_SW, RST_FLAG_WTR,
+    CurrentTable, FlashCtrl, IdleSkipStats, PeriphTimeNs, PowerMode, PowerReport, SysCtrl,
+    RST_FLAG_MR, RST_FLAG_RPOR, RST_FLAG_SW, RST_FLAG_WTR,
 };
 use crate::peripherals::tmr::Timer;
 use crate::peripherals::uart::Uart;
@@ -67,6 +67,7 @@ pub struct SysBus {
     pub time_ns_by_mode: [u64; 5],
     pub unpowered_ns: u64,
     pub sleep_skipped_ns: u64,
+    pub idle_skip_stats: IdleSkipStats,
     pub current_table: CurrentTable,
     pub periph_time_ns: PeriphTimeNs,
     pub total_cycles: u64,
@@ -147,6 +148,7 @@ impl SysBus {
             time_ns_by_mode: [0; 5],
             unpowered_ns: 0,
             sleep_skipped_ns: 0,
+            idle_skip_stats: IdleSkipStats::default(),
             current_table: CurrentTable::default(),
             periph_time_ns: PeriphTimeNs::default(),
             total_cycles: 0,
@@ -723,17 +725,38 @@ impl SysBus {
                 self.timers[3].write_u8(addr - 0x4000_2C00, val);
                 self.mmio_sync_requested = true;
             }
-            0x4000_3000..=0x4000_300F => self.uarts[0].write_u8(addr - 0x4000_3000, val),
-            0x4000_3400..=0x4000_340F => self.uarts[1].write_u8(addr - 0x4000_3400, val),
-            0x4000_3800..=0x4000_380F => self.uarts[2].write_u8(addr - 0x4000_3800, val),
-            0x4000_3C00..=0x4000_3C0F => self.uarts[3].write_u8(addr - 0x4000_3C00, val),
-            0x4000_4000..=0x4000_401F => self.spis[0].write_u8(addr - 0x4000_4000, val),
-            0x4000_4400..=0x4000_441F => self.spis[1].write_u8(addr - 0x4000_4400, val),
+            0x4000_3000..=0x4000_300F => {
+                self.uarts[0].write_u8(addr - 0x4000_3000, val);
+                self.mmio_sync_requested = true;
+            }
+            0x4000_3400..=0x4000_340F => {
+                self.uarts[1].write_u8(addr - 0x4000_3400, val);
+                self.mmio_sync_requested = true;
+            }
+            0x4000_3800..=0x4000_380F => {
+                self.uarts[2].write_u8(addr - 0x4000_3800, val);
+                self.mmio_sync_requested = true;
+            }
+            0x4000_3C00..=0x4000_3C0F => {
+                self.uarts[3].write_u8(addr - 0x4000_3C00, val);
+                self.mmio_sync_requested = true;
+            }
+            0x4000_4000..=0x4000_401F => {
+                self.spis[0].write_u8(addr - 0x4000_4000, val);
+                self.mmio_sync_requested = true;
+            }
+            0x4000_4400..=0x4000_441F => {
+                self.spis[1].write_u8(addr - 0x4000_4400, val);
+                self.mmio_sync_requested = true;
+            }
             0x4000_5000..=0x4000_5017 => {
                 self.pwm.write_u8(addr - 0x4000_5000, val);
                 self.mmio_sync_requested = true;
             }
-            0x4000_9000..=0x4000_9203 => self.usbhs.write_u8(addr - 0x4000_9000, val),
+            0x4000_9000..=0x4000_9203 => {
+                self.usbhs.write_u8(addr - 0x4000_9000, val);
+                self.mmio_sync_requested = true;
+            }
             0x4000_C000..=0x4000_DFFF => self.ble.write_u8(addr - 0x4000_C000, val),
             _ => {
                 self.record_unknown_mmio(addr);
@@ -814,17 +837,38 @@ impl SysBus {
                 self.timers[3].write_u32(addr - 0x4000_2C00, val);
                 self.mmio_sync_requested = true;
             }
-            0x4000_3000..=0x4000_300F => self.uarts[0].write_u32(addr - 0x4000_3000, val),
-            0x4000_3400..=0x4000_340F => self.uarts[1].write_u32(addr - 0x4000_3400, val),
-            0x4000_3800..=0x4000_380F => self.uarts[2].write_u32(addr - 0x4000_3800, val),
-            0x4000_3C00..=0x4000_3C0F => self.uarts[3].write_u32(addr - 0x4000_3C00, val),
-            0x4000_4000..=0x4000_401F => self.spis[0].write_u32(addr - 0x4000_4000, val),
-            0x4000_4400..=0x4000_441F => self.spis[1].write_u32(addr - 0x4000_4400, val),
+            0x4000_3000..=0x4000_300F => {
+                self.uarts[0].write_u32(addr - 0x4000_3000, val);
+                self.mmio_sync_requested = true;
+            }
+            0x4000_3400..=0x4000_340F => {
+                self.uarts[1].write_u32(addr - 0x4000_3400, val);
+                self.mmio_sync_requested = true;
+            }
+            0x4000_3800..=0x4000_380F => {
+                self.uarts[2].write_u32(addr - 0x4000_3800, val);
+                self.mmio_sync_requested = true;
+            }
+            0x4000_3C00..=0x4000_3C0F => {
+                self.uarts[3].write_u32(addr - 0x4000_3C00, val);
+                self.mmio_sync_requested = true;
+            }
+            0x4000_4000..=0x4000_401F => {
+                self.spis[0].write_u32(addr - 0x4000_4000, val);
+                self.mmio_sync_requested = true;
+            }
+            0x4000_4400..=0x4000_441F => {
+                self.spis[1].write_u32(addr - 0x4000_4400, val);
+                self.mmio_sync_requested = true;
+            }
             0x4000_5000..=0x4000_5017 => {
                 self.pwm.write_u32(addr - 0x4000_5000, val);
                 self.mmio_sync_requested = true;
             }
-            0x4000_9000..=0x4000_9203 => self.usbhs.write_u32(addr - 0x4000_9000, val),
+            0x4000_9000..=0x4000_9203 => {
+                self.usbhs.write_u32(addr - 0x4000_9000, val);
+                self.mmio_sync_requested = true;
+            }
             _ => {
                 let b = val.to_le_bytes();
                 for i in 0..4 {
@@ -1740,6 +1784,62 @@ impl Ch585Machine {
                 }
             }
         }
+        let mie = self.cpu.mie();
+        let nesting = self.cpu.nesting_enabled();
+        if (self.bus.systick.ctlr & 0x03) == 0x03
+            && (self.bus.systick.sr & 1) == 0
+            && self.bus.pfic.can_deliver_irq(SysTick::IRQN, mie, nesting)
+        {
+            if let Some(st_c) = self.bus.systick.next_irq_cycles() {
+                budget = budget.min(st_c.clamp(1, u32::MAX as u64) as u32);
+            }
+        }
+        for t in 0..4 {
+            if (slp0 & (1 << t)) == 0
+                && (self.bus.timers[t].int_flag & self.bus.timers[t].inter_en) == 0
+                && self.bus.pfic.can_deliver_irq(self.bus.timers[t].irqn, mie, nesting)
+            {
+                if let Some(tmr_c) = self.bus.timers[t].next_irq_cycles() {
+                    budget = budget.min(tmr_c.clamp(1, u32::MAX as u64) as u32);
+                }
+            }
+        }
+        if (slp1 & 0x20) == 0 {
+            let usb_irq_ok = self.bus.pfic.can_deliver_irq(irq::USB2_DEVICE, mie, nesting);
+            if let Some(usb_c) = self.bus.usbhs.next_event_cycles(usb_irq_ok) {
+                budget = budget.min(usb_c.max(1));
+            }
+        }
+        let lse_stopped = self.bus.sys.lse_failed && (self.bus.sys.ck32k_config & 0x04) != 0;
+        if !lse_stopped
+            && !self.bus.rtc.irq_asserted()
+            && self.bus.pfic.can_deliver_irq(irq::RTC, mie, nesting)
+        {
+            if let Some(rtc_c) = self
+                .bus
+                .rtc
+                .next_wakeup_sys_cycles(sys_hz as u32, self.bus.clk_32k_hz)
+            {
+                budget = budget.min(rtc_c.clamp(1, u32::MAX as u64) as u32);
+            }
+        }
+        for u in 0..4 {
+            if (slp0 & (1 << (4 + u))) == 0 {
+                if let Some(uart_c) = self.bus.uarts[u].next_event_cycles() {
+                    budget = budget.min(uart_c.max(1));
+                }
+            }
+        }
+        for s in 0..2 {
+            if (slp1 & (1 << s)) == 0 {
+                if let Some(spi_c) = self.bus.spis[s].next_event_cycles() {
+                    budget = budget.min(spi_c.max(1));
+                }
+            }
+        }
+        if let Some(wdog_c) = self.bus.sys.next_wdog_cycles() {
+            budget = budget.min(wdog_c.clamp(1, u32::MAX as u64) as u32);
+        }
 
         self.bus.power_mode = PowerMode::Active;
         let has_irq = (self.bus.pfic.pending_words != 0
@@ -1876,6 +1976,8 @@ impl Ch585Machine {
             self.bus.total_time_ns += jump_ns;
             self.bus.unpowered_ns += jump_ns;
             self.bus.sleep_skipped_ns += jump_ns;
+            self.bus.idle_skip_stats.jumps += 1;
+            self.bus.idle_skip_stats.skipped_ns += jump_ns;
             self.poll_ext_inner(scoped);
             return true;
         }
@@ -1897,125 +1999,276 @@ impl Ch585Machine {
         let lse_stopped = self.bus.sys.lse_failed && (self.bus.sys.ck32k_config & 0x04) != 0;
         let slp0 = self.bus.sys.slp_clk_off0;
         let slp1 = self.bus.sys.slp_clk_off1;
-
-        // Keep cycle-accurate stepping while USB HS is active (unsuspended & host attached).
-        if (slp1 & 0x20) == 0
-            && (!deep || (self.bus.sys.slp_wake_ctrl & 0x02) != 0)
-            && self.bus.usbhs.device_enabled()
-            && self.bus.usbhs.host_attached
-            && !self.bus.usbhs.suspended
-        {
-            return false;
-        }
-
-        if !deep {
-            if (self.bus.sys.safe_clk_ctrl & 0x02) == 0 && self.bus.adc.is_converting() {
-                return false;
-            }
-            if (slp1 & 0x04) == 0
-                && (self.bus.pwm.out_en != 0 || (self.bus.pwm.int_ctrl & 0x01) != 0)
-            {
-                return false;
-            }
-            if (self.bus.sys.osc_cal_ctrl & 0x20) != 0 && (self.bus.sys.osc_cal_ctrl & 0x08) == 0 {
-                return false;
-            }
-            for u in 0..4 {
-                if (slp0 & (1 << (4 + u))) == 0
-                    && (!self.bus.uarts[u].tx_fifo.is_empty()
-                        || !self.bus.uarts[u].rx_fifo.is_empty())
-                {
-                    return false;
-                }
-            }
-            for s in 0..2 {
-                if (slp1 & (1 << s)) == 0
-                    && (self.bus.spis[s].total_cnt > 0 || !self.bus.spis[s].fifo.is_empty())
-                {
-                    return false;
-                }
-            }
-            for t in 0..4 {
-                if (slp0 & (1 << t)) == 0 && self.bus.timers[t].is_pwm_or_dma_active() {
-                    return false;
-                }
-            }
-        }
-
-        let cur_ns = self.bus.total_time_ns;
-        let mut next_ns = target_ns;
-        if let Some(ext_ns) = self.ext.next_event_ns_with(scoped.as_deref()) {
-            next_ns = next_ns.min(ext_ns);
-        }
-        if let Some(rf_ns) = self.bus.ble.rf.next_event_ns() {
-            next_ns = next_ns.min(rf_ns);
-        }
-        if let Some(flash_rem) = self.bus.flash_ctrl.remaining_ns() {
-            next_ns = next_ns.min(cur_ns.saturating_add(flash_rem));
-        }
-        if !lse_stopped && (!deep || (self.bus.sys.slp_wake_ctrl & 0x08) != 0) {
-            if let Some(rtc_rem) = self.bus.rtc.next_wakeup_ns(self.bus.clk_32k_hz) {
-                next_ns = next_ns.min(cur_ns.saturating_add(rtc_rem));
-            }
-        }
-        if let Some(wdog_rem) = self.bus.sys.next_wdog_ns(deep) {
-            next_ns = next_ns.min(cur_ns.saturating_add(wdog_rem));
-        }
-
         let sys_hz = self.bus.sys.sys_clk_hz().max(32_000) as u128;
-        if !deep {
-            let cyc_to_ns = |c: u64| -> u64 {
-                ((c as u128) * 1_000_000_000u128).div_ceil(sys_hz).max(1) as u64
-            };
-            if let Some(st_cyc) = self.bus.systick.next_irq_cycles() {
-                next_ns = next_ns.min(cur_ns.saturating_add(cyc_to_ns(st_cyc)));
+        let cur_ns = self.bus.total_time_ns;
+        let one_cyc_ns = (1_000_000_000u64 / (sys_hz as u64)).max(1);
+
+        if deep {
+            if (slp1 & 0x20) == 0
+                && (self.bus.sys.slp_wake_ctrl & 0x02) != 0
+                && self.bus.usbhs.device_enabled()
+                && self.bus.usbhs.host_attached
+                && !self.bus.usbhs.suspended
+            {
+                self.bus.idle_skip_stats.blocked_usb_count += 1;
+                self.bus.idle_skip_stats.blocked_usb_ns += one_cyc_ns;
+                return false;
             }
-            for t in 0..4 {
-                if (slp0 & (1 << t)) == 0 {
-                    if let Some(tmr_cyc) = self.bus.timers[t].next_irq_cycles() {
-                        next_ns = next_ns.min(cur_ns.saturating_add(cyc_to_ns(tmr_cyc)));
-                    }
+
+            let mut next_ns = target_ns;
+            let mut ext_ns_val = u64::MAX;
+            if let Some(ext_ns) = self.ext.next_event_ns_with(scoped.as_deref()) {
+                ext_ns_val = ext_ns;
+                next_ns = next_ns.min(ext_ns);
+            }
+            if let Some(rf_ns) = self.bus.ble.rf.next_event_ns() {
+                next_ns = next_ns.min(rf_ns);
+            }
+            if let Some(flash_rem) = self.bus.flash_ctrl.remaining_ns() {
+                next_ns = next_ns.min(cur_ns.saturating_add(flash_rem));
+            }
+            if !lse_stopped && (self.bus.sys.slp_wake_ctrl & 0x08) != 0 {
+                if let Some(rtc_rem) = self.bus.rtc.next_wakeup_ns(self.bus.clk_32k_hz) {
+                    next_ns = next_ns.min(cur_ns.saturating_add(rtc_rem));
                 }
             }
-        }
+            if let Some(wdog_rem) = self.bus.sys.next_wdog_ns(true) {
+                next_ns = next_ns.min(cur_ns.saturating_add(wdog_rem));
+            }
 
-        let jump_ns = next_ns.saturating_sub(cur_ns);
-        if jump_ns < 1_000 {
-            return false;
-        }
+            let jump_ns = next_ns.saturating_sub(cur_ns);
+            if jump_ns < 1_000 {
+                if ext_ns_val.saturating_sub(cur_ns) < 1_000 {
+                    self.bus.idle_skip_stats.blocked_ext_count += 1;
+                    self.bus.idle_skip_stats.blocked_ext_ns += one_cyc_ns;
+                } else {
+                    self.bus.idle_skip_stats.blocked_short_window_count += 1;
+                    self.bus.idle_skip_stats.blocked_short_window_ns += one_cyc_ns;
+                }
+                return false;
+            }
 
-        self.bus.power_mode = mode;
-        self.bus.total_time_ns += jump_ns;
-        self.bus.sleep_skipped_ns += jump_ns;
-        self.bus.accumulate_power_ns(jump_ns, mode);
-        self.bus.flash_ctrl.step(jump_ns, &mut self.bus.flash);
-        if self.bus.flash_ctrl.power_cut_triggered {
-            self.bus.flash_ctrl.power_cut_triggered = false;
-            self.power_off();
+            self.bus.power_mode = mode;
+            self.bus.total_time_ns += jump_ns;
+            self.bus.sleep_skipped_ns += jump_ns;
+            self.bus.idle_skip_stats.jumps += 1;
+            self.bus.idle_skip_stats.skipped_ns += jump_ns;
+            self.bus.accumulate_power_ns(jump_ns, mode);
+            self.bus.flash_ctrl.step(jump_ns, &mut self.bus.flash);
+            if self.bus.flash_ctrl.power_cut_triggered {
+                self.bus.flash_ctrl.power_cut_triggered = false;
+                self.power_off();
+                return true;
+            }
+
+            self.bus
+                .sys
+                .advance_wdog_ns(jump_ns, true, &mut self.bus.pfic);
+            if !lse_stopped {
+                self.bus
+                    .rtc
+                    .advance_ns(jump_ns, self.bus.clk_32k_hz, &mut self.bus.pfic);
+                if (self.bus.sys.slp_wake_ctrl & 0x08) == 0 {
+                    self.bus.pfic.sync_level_irq(irq::RTC, false);
+                }
+            }
+
+            self.poll_ext_inner(scoped);
+            if self.bus.sys.wdog_reset_requested {
+                self.soft_reset(RST_FLAG_WTR);
+            }
             return true;
         }
 
-        self.bus
-            .sys
-            .advance_wdog_ns(jump_ns, deep, &mut self.bus.pfic);
+        // Idle / Halt (!deep): fast-forward across WFI windows even while USB HS is active,
+        // stopping cleanly before the earliest observable peripheral/timer/IRQ/external event.
+        let usb_c = if (slp1 & 0x20) == 0 {
+            self.bus.usbhs.next_event_cycles(true)
+        } else {
+            None
+        };
+        let adc_c = if (self.bus.sys.safe_clk_ctrl & 0x02) == 0 {
+            self.bus.adc.next_event_cycles()
+        } else {
+            None
+        };
+        let usb_block = usb_c.is_some_and(|c| c <= 1);
+        let adc_block = adc_c.is_some_and(|c| c <= 1);
+        let tmr_block = (0..4)
+            .any(|t| (slp0 & (1 << t)) == 0 && self.bus.timers[t].is_pwm_or_dma_active());
+        let pwm_block = (slp1 & 0x04) == 0
+            && (self.bus.pwm.out_en != 0 || (self.bus.pwm.int_ctrl & 0x01) != 0);
+        let uart_block = (0..4).any(|u| {
+            (slp0 & (1 << (4 + u))) == 0
+                && (!self.bus.uarts[u].tx_fifo.is_empty() || !self.bus.uarts[u].rx_fifo.is_empty())
+        });
+        let spi_block = (0..2).any(|s| {
+            (slp1 & (1 << s)) == 0
+                && (self.bus.spis[s].total_cnt > 0 || !self.bus.spis[s].fifo.is_empty())
+        });
+        let osc_cal_block =
+            (self.bus.sys.osc_cal_ctrl & 0x20) != 0 && (self.bus.sys.osc_cal_ctrl & 0x08) == 0;
+
+        let rem_ns = self.bus.time_ns_rem as u128;
+        let ns_to_ceil_cycles = |delta_ns: u64| -> u64 {
+            if delta_ns == 0 {
+                return 0;
+            }
+            let target_scaled = (delta_ns as u128).saturating_mul(sys_hz);
+            target_scaled
+                .saturating_sub(rem_ns)
+                .div_ceil(1_000_000_000u128)
+                .max(1) as u64
+        };
+
+        let mut max_cyc = ns_to_ceil_cycles(target_ns.saturating_sub(cur_ns));
+        let mut ext_cyc = u64::MAX;
+        if let Some(ext_ns) = self.ext.next_event_ns_with(scoped.as_deref()) {
+            ext_cyc = ns_to_ceil_cycles(ext_ns.saturating_sub(cur_ns));
+            max_cyc = max_cyc.min(ext_cyc);
+        }
+        if let Some(rf_ns) = self.bus.ble.rf.next_event_ns() {
+            max_cyc = max_cyc.min(ns_to_ceil_cycles(rf_ns.saturating_sub(cur_ns)));
+        }
+        if let Some(flash_rem) = self.bus.flash_ctrl.remaining_ns() {
+            max_cyc = max_cyc.min(ns_to_ceil_cycles(flash_rem));
+        }
+
+        let nesting = self.cpu.nesting_enabled();
+        if !lse_stopped
+            && !self.bus.rtc.irq_asserted()
+            && self.bus.pfic.can_deliver_irq(irq::RTC, true, nesting)
+        {
+            if let Some(rtc_c) = self
+                .bus
+                .rtc
+                .next_wakeup_sys_cycles(sys_hz as u32, self.bus.clk_32k_hz)
+            {
+                max_cyc = max_cyc.min(rtc_c);
+            }
+        }
+        if let Some(wdog_c) = self.bus.sys.next_wdog_cycles() {
+            max_cyc = max_cyc.min(wdog_c);
+        }
+        if (self.bus.systick.ctlr & 0x03) == 0x03
+            && (self.bus.systick.sr & 1) == 0
+            && self.bus.pfic.can_deliver_irq(SysTick::IRQN, true, nesting)
+        {
+            if let Some(st_cyc) = self.bus.systick.next_irq_cycles() {
+                max_cyc = max_cyc.min(st_cyc);
+            }
+        }
+        for t in 0..4 {
+            if (slp0 & (1 << t)) == 0
+                && !self.bus.timers[t].is_pwm_or_dma_active()
+                && (self.bus.timers[t].int_flag & self.bus.timers[t].inter_en) == 0
+                && self.bus.pfic.can_deliver_irq(self.bus.timers[t].irqn, true, nesting)
+            {
+                if let Some(tmr_cyc) = self.bus.timers[t].next_irq_cycles() {
+                    max_cyc = max_cyc.min(tmr_cyc);
+                }
+            }
+        }
+        if let Some(c) = usb_c {
+            max_cyc = max_cyc.min(c.saturating_sub(1) as u64);
+        }
+        if let Some(c) = adc_c {
+            max_cyc = max_cyc.min(c.saturating_sub(1) as u64);
+        }
+
+        let any_periph_block =
+            usb_block || adc_block || tmr_block || pwm_block || uart_block || spi_block || osc_cal_block;
+        if any_periph_block || max_cyc < 2 {
+            let st = &mut self.bus.idle_skip_stats;
+            if usb_block {
+                st.blocked_usb_count += 1;
+                st.blocked_usb_ns += one_cyc_ns;
+            }
+            if adc_block {
+                st.blocked_adc_count += 1;
+                st.blocked_adc_ns += one_cyc_ns;
+            }
+            if tmr_block {
+                st.blocked_tmr_count += 1;
+                st.blocked_tmr_ns += one_cyc_ns;
+            }
+            if pwm_block {
+                st.blocked_pwm_count += 1;
+                st.blocked_pwm_ns += one_cyc_ns;
+            }
+            if uart_block {
+                st.blocked_uart_count += 1;
+                st.blocked_uart_ns += one_cyc_ns;
+            }
+            if spi_block {
+                st.blocked_spi_count += 1;
+                st.blocked_spi_ns += one_cyc_ns;
+            }
+            if osc_cal_block {
+                st.blocked_osc_cal_count += 1;
+                st.blocked_osc_cal_ns += one_cyc_ns;
+            }
+            if !any_periph_block {
+                if ext_cyc < 2 {
+                    st.blocked_ext_count += 1;
+                    st.blocked_ext_ns += one_cyc_ns;
+                } else {
+                    st.blocked_short_window_count += 1;
+                    st.blocked_short_window_ns += one_cyc_ns;
+                }
+            }
+            return false;
+        }
+
+        let cyc = max_cyc;
+        let num = (self.bus.time_ns_rem as u128) + (cyc as u128) * 1_000_000_000u128;
+        let dt = (num / sys_hz) as u64;
+        self.bus.time_ns_rem = (num % sys_hz) as u64;
+        self.bus.total_time_ns += dt;
+        self.bus.total_cycles += cyc;
+        self.cpu.cycles += cyc;
+        self.bus.sleep_skipped_ns += dt;
+        self.bus.idle_skip_stats.jumps += 1;
+        self.bus.idle_skip_stats.skipped_cycles += cyc;
+        self.bus.idle_skip_stats.skipped_ns += dt;
+        self.bus.power_mode = mode;
+        self.bus.accumulate_power_ns(dt, mode);
+
+        if self.bus.flash_ctrl.has_pending_op() {
+            self.bus.flash_ctrl.step(dt, &mut self.bus.flash);
+            self.bus.sync_flash_epoch();
+            if self.bus.flash_ctrl.power_cut_triggered {
+                self.bus.flash_ctrl.power_cut_triggered = false;
+                self.power_off();
+                return true;
+            }
+        }
+
+        self.bus.sys.step_u64(cyc, &mut self.bus.pfic);
+        if self.bus.sys.is_bat_monitor_enabled() {
+            self.bus
+                .sys
+                .evaluate_bat_monitor(self.bus.vdd_mv, &mut self.bus.pfic);
+        }
         if !lse_stopped {
             self.bus
                 .rtc
-                .advance_ns(jump_ns, self.bus.clk_32k_hz, &mut self.bus.pfic);
-            if deep && (self.bus.sys.slp_wake_ctrl & 0x08) == 0 {
-                self.bus.pfic.sync_level_irq(irq::RTC, false);
+                .step_u64(cyc, sys_hz as u32, self.bus.clk_32k_hz, &mut self.bus.pfic);
+        }
+        self.bus.systick.advance_cycles(cyc, &mut self.bus.pfic);
+        for t in 0..4 {
+            if (slp0 & (1 << t)) == 0 {
+                self.bus.timers[t].advance_cycles(cyc, &mut self.bus.pfic);
             }
         }
-        if !deep {
-            let cyc = (((jump_ns as u128) * sys_hz) / 1_000_000_000u128) as u64;
-            self.bus.total_cycles += cyc;
-            self.cpu.cycles += cyc;
-            self.bus.systick.advance_cycles(cyc, &mut self.bus.pfic);
-            for t in 0..4 {
-                if (slp0 & (1 << t)) == 0 {
-                    self.bus.timers[t].advance_cycles(cyc, &mut self.bus.pfic);
-                }
-            }
+        if (self.bus.sys.safe_clk_ctrl & 0x02) == 0 {
+            self.bus.adc.advance_idle_cycles(cyc);
+        }
+        if (slp1 & 0x20) == 0 {
+            self.bus.usbhs.advance_idle_cycles(cyc, &mut self.bus.pfic);
+        }
+        if self.bus.trace.enabled {
+            self.bus.record_trace_now();
         }
 
         self.poll_ext_inner(scoped);

@@ -95,6 +95,32 @@ pub struct PowerReport {
     pub total_avg_ua: f64,
 }
 
+/// Diagnostic counters for Idle/Sleep fast-forward jumps and per-peripheral blockers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IdleSkipStats {
+    pub jumps: u64,
+    pub skipped_cycles: u64,
+    pub skipped_ns: u64,
+    pub blocked_usb_count: u64,
+    pub blocked_usb_ns: u64,
+    pub blocked_adc_count: u64,
+    pub blocked_adc_ns: u64,
+    pub blocked_tmr_count: u64,
+    pub blocked_tmr_ns: u64,
+    pub blocked_pwm_count: u64,
+    pub blocked_pwm_ns: u64,
+    pub blocked_uart_count: u64,
+    pub blocked_uart_ns: u64,
+    pub blocked_spi_count: u64,
+    pub blocked_spi_ns: u64,
+    pub blocked_osc_cal_count: u64,
+    pub blocked_osc_cal_ns: u64,
+    pub blocked_ext_count: u64,
+    pub blocked_ext_ns: u64,
+    pub blocked_short_window_count: u64,
+    pub blocked_short_window_ns: u64,
+}
+
 /// System control, Safe Access, Clocks, Power, IWDG/WDOG, OSC Calibration, and Flash SPI controller.
 #[derive(Debug, Clone)]
 pub struct SysCtrl {
@@ -301,6 +327,81 @@ impl SysCtrl {
             best = Some(best.map_or(ns, |b| b.min(ns)));
         }
         best
+    }
+
+    /// System clock cycles until the next active WDOG or IWDG IRQ/reset event.
+    pub fn next_wdog_cycles(&self) -> Option<u64> {
+        let mut best: Option<u64> = None;
+        if (self.rst_wdog_ctrl & 0x06) != 0 {
+            let rem_inc = (256u64 - self.wdog_count as u64).max(1);
+            let cyc = rem_inc
+                .saturating_mul(131_072)
+                .saturating_sub(self.wdog_prescaler as u64)
+                .max(1);
+            best = Some(cyc);
+        }
+        if self.iwdg_enabled {
+            let fsys = self.sys_clk_hz().max(32_000) as u64;
+            let pr_shift = ((self.iwdg_cfg >> 12) & 0x7) as u32;
+            let div = 4u64 << pr_shift;
+            let cycles_per_tick = (fsys * div / 32_000).max(1);
+            let rem_ticks = (self.iwdg_counter as u64) + 1;
+            let cyc = rem_ticks
+                .saturating_mul(cycles_per_tick)
+                .saturating_sub(self.iwdg_tick_acc)
+                .max(1);
+            best = Some(best.map_or(cyc, |b| b.min(cyc)));
+        }
+        best
+    }
+
+    /// O(1) active/idle cycle advance matching [`SysCtrl::step`] for safe timer, WDOG, and IWDG.
+    pub fn step_u64(&mut self, cycles: u64, pfic: &mut Pfic) {
+        if cycles == 0 {
+            return;
+        }
+        if self.safe_stage == 2 && (self.safe_mode_ctrl & 0x01) != 0 {
+            if (self.safe_timer as u64) > cycles {
+                self.safe_timer -= cycles as u8;
+            } else {
+                self.safe_stage = 0;
+                self.safe_timer = 0;
+            }
+        }
+        if (self.rst_wdog_ctrl & 0x06) != 0 {
+            let total_pre = (self.wdog_prescaler as u64).saturating_add(cycles);
+            let incs = total_pre / 131_072;
+            self.wdog_prescaler = (total_pre % 131_072) as u32;
+            if incs > 0 {
+                let sum = (self.wdog_count as u64).saturating_add(incs);
+                self.wdog_count = (sum & 0xFF) as u8;
+                if sum >= 256 {
+                    self.rst_wdog_ctrl |= 0x10;
+                    if (self.rst_wdog_ctrl & 0x04) != 0 {
+                        pfic.set_pending(irq::WDOG_BAT);
+                    }
+                    if (self.rst_wdog_ctrl & 0x02) != 0 {
+                        self.wdog_reset_requested = true;
+                    }
+                }
+            }
+        }
+        if self.iwdg_enabled {
+            let fsys = self.sys_clk_hz().max(32_000) as u64;
+            let pr_shift = ((self.iwdg_cfg >> 12) & 0x7) as u32;
+            let div = 4u64 << pr_shift;
+            let cycles_per_tick = (fsys * div / 32_000).max(1) as u128;
+            let total = (self.iwdg_tick_acc as u128).saturating_add(cycles as u128);
+            let decrs = total / cycles_per_tick;
+            self.iwdg_tick_acc = (total % cycles_per_tick) as u64;
+            if decrs > (self.iwdg_counter as u128) {
+                self.iwdg_counter = 0;
+                self.wdog_reset_requested = true;
+            } else {
+                self.iwdg_counter -= decrs as u16;
+            }
+            self.iwdg_cfg = (self.iwdg_cfg & !(0xFFF << 16)) | ((self.iwdg_counter as u32) << 16);
+        }
     }
 
     pub fn advance_wdog_ns(&mut self, dt_ns: u64, deep_pwr_down: bool, pfic: &mut Pfic) {

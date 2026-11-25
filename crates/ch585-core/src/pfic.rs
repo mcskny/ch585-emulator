@@ -121,6 +121,32 @@ impl Pfic {
         (self.iactr[idx] & bit) != 0
     }
 
+    /// Returns `true` if `irqn` would be immediately deliverable were it pending under the current
+    /// `mie` and `nesting_enabled` state.
+    #[inline]
+    pub fn can_deliver_irq(&self, irqn: u8, mie: bool, nesting_enabled: bool) -> bool {
+        if irqn < 12 && irqn != 2 {
+            return false;
+        }
+        if irqn != 2 && !mie {
+            return false;
+        }
+        if !self.is_enabled(irqn) || self.is_active(irqn) {
+            return false;
+        }
+        let prio = self.iprior[irqn as usize];
+        let thresh = (self.ithresdr & 0xFF) as u8;
+        if thresh != 0 && prio >= thresh {
+            return false;
+        }
+        if let Some(&cur_iq) = self.active_stack.last() {
+            if !nesting_enabled || prio >= self.iprior[cur_iq as usize] {
+                return false;
+            }
+        }
+        true
+    }
+
     pub fn set_active(&mut self, irqn: u8, active: bool) {
         let idx = (irqn as usize) >> 5;
         let bit = 1u32 << (irqn & 31);
