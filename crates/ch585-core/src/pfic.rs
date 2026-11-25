@@ -489,8 +489,10 @@ impl SysTick {
                 if (val & (1 << 5)) != 0 {
                     self.cnt = if (val & (1 << 4)) != 0 { self.cmp } else { 0 };
                 }
+                // SysTick_SR_SWIE (offset 0x04 bit 31) is CH585's primary SWI trigger;
+                // CTLR bit 31 also maps to SWI_IRQn (14) on QingKe V4.
                 if (val & (1 << 31)) != 0 {
-                    pfic.set_pending(Self::IRQN);
+                    pfic.set_pending(14);
                 }
                 self.ctlr = val & !(1 << 5);
             }

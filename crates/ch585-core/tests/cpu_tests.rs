@@ -249,3 +249,180 @@ fn test_elf_loader_parses_real_test_elf() {
     // Verify highcode segment uses flash LMA (paddr < 0x1000) even though vaddr is 0x2000_0000
     assert!(elf.segments.iter().any(|s| s.vaddr == 0x2000_0000 && s.paddr < 0x1000));
 }
+
+#[test]
+fn test_hpe_intsyscr_bit5_context_switch_and_machine_mode_preserve() {
+    let mut bus = FlatBus::new();
+    let mut cpu = Cpu::new();
+
+    // Mode 3 vector table in SRAM at 0x2000_0000
+    bus.write_u32(0x2000_0000 + 12 * 4, 0x0000_0200); // SysTick -> 0x200
+    bus.write_u32(0x2000_0000 + 14 * 4, 0x0000_0300); // SWI     -> 0x300
+
+    // Simulate startup state after initial MRET into main(): Machine mode,
+    // intsyscr = 3 (HPE + nesting), mtvec = 0x2000_0003, mstatus = 0x0088 (MIE=1, MPIE=1, MPP=0).
+    cpu.intsyscr = 3;
+    cpu.mtvec = 0x2000_0003;
+    cpu.mstatus = 0x0088;
+    cpu.priv_mode = Privilege::Machine;
+    cpu.regs[2] = 0x2000_0800; // sp (task A)
+    cpu.regs[10] = 0x1234_5678; // a0 (task A)
+
+    // Task A at 0x100: j 0x100
+    bus.load_flash(0x100, &0x0000_006fu32.to_le_bytes());
+
+    // Normal HPE ISR (IRQ 12) at 0x200:
+    //   addi a0, x0, 42
+    //   mret
+    bus.load_flash(0x200, &0x02a0_0513u32.to_le_bytes());
+    bus.load_flash(0x204, &0x3020_0073u32.to_le_bytes());
+
+    // Context-switch SW_Handler (IRQ 14) at 0x300 (same pattern as FreeRTOS portASM.S):
+    //   li a1, 0x20
+    //   csrs 0x804, a1       (set INTSYSCR bit 5 to suppress HPE unstack on this mret)
+    //   li t0, 0x400
+    //   csrw mepc, t0
+    //   li a0, 99
+    //   lui sp, 0x20001
+    //   mret
+    bus.load_flash(0x300, &0x0200_0593u32.to_le_bytes());
+    bus.load_flash(0x304, &0x8045_a073u32.to_le_bytes());
+    bus.load_flash(0x308, &0x4000_0293u32.to_le_bytes());
+    bus.load_flash(0x30C, &0x3412_9073u32.to_le_bytes());
+    bus.load_flash(0x310, &0x0630_0513u32.to_le_bytes());
+    bus.load_flash(0x314, &0x2000_1137u32.to_le_bytes());
+    bus.load_flash(0x318, &0x3020_0073u32.to_le_bytes());
+
+    // Task B at 0x400: j 0x400
+    bus.load_flash(0x400, &0x0000_006fu32.to_le_bytes());
+
+    // Enable IRQ 12 & 14
+    bus.pfic.write_u32(0x100, (1 << 12) | (1 << 14));
+
+    // 1. Trigger normal HPE IRQ 12 and verify GPR restore + Machine mode preservation
+    cpu.pc = 0x100;
+    bus.pfic.set_pending(12);
+    cpu.step(&mut bus); // enters IRQ 12 at 0x200
+    assert_eq!(cpu.pc, 0x200);
+    assert_eq!(cpu.hpe_stack.len(), 1);
+    cpu.step(&mut bus); // li a0, 42
+    assert_eq!(cpu.regs[10], 42);
+    cpu.step(&mut bus); // mret -> restores a0 & stays in Machine mode
+    assert_eq!(cpu.pc, 0x100);
+    assert_eq!(cpu.regs[10], 0x1234_5678);
+    assert_eq!(cpu.priv_mode, Privilege::Machine);
+    assert!(cpu.mie());
+    assert!(cpu.hpe_stack.is_empty());
+    assert!(!bus.pfic.is_active(12));
+
+    // 2. Trigger SWI_IRQn via SysTick->CTLR bit 31 and run context switch with INTSYSCR bit 5
+    bus.systick.write_u32(0x00, 1 << 31, &mut bus.pfic);
+    assert!(bus.pfic.is_pending(14));
+    cpu.step(&mut bus); // enters SW_Handler at 0x300
+    assert_eq!(cpu.pc, 0x300);
+    assert_eq!(cpu.hpe_stack.len(), 1);
+
+    for _ in 0..7 {
+        cpu.step(&mut bus);
+    }
+    assert_eq!(cpu.pc, 0x400); // switched to Task B, NOT Task A's 0x100
+    assert_eq!(cpu.regs[10], 99); // Task B's a0 preserved, NOT overwritten by HPE pop
+    assert_eq!(cpu.regs[2], 0x2000_1000); // Task B's sp preserved
+    assert_eq!(cpu.intsyscr & 0x20, 0); // bit 5 auto-cleared on mret
+    assert!(cpu.hpe_stack.is_empty());
+    assert!(!bus.pfic.is_active(14));
+    assert_eq!(cpu.priv_mode, Privilege::Machine);
+    assert!(cpu.mie());
+
+    // 3. Normal HPE interrupt afterwards must still push & restore Task B's GPRs normally
+    bus.pfic.set_pending(12);
+    cpu.step(&mut bus); // enters IRQ 12
+    assert_eq!(cpu.pc, 0x200);
+    cpu.step(&mut bus); // li a0, 42
+    assert_eq!(cpu.regs[10], 42);
+    cpu.step(&mut bus); // mret -> restores Task B's a0 = 99
+    assert_eq!(cpu.pc, 0x400);
+    assert_eq!(cpu.regs[10], 99);
+    assert!(cpu.hpe_stack.is_empty());
+}
+
+#[test]
+fn test_hpe_nested_interrupt_preserves_outer_mepc_and_mstatus() {
+    let mut bus = FlatBus::new();
+    let mut cpu = Cpu::new();
+
+    bus.write_u32(0x2000_0000 + 12 * 4, 0x0000_0200); // IRQ 12 (low priority)
+    bus.write_u32(0x2000_0000 + 17 * 4, 0x0000_0300); // IRQ 17 (high priority)
+
+    cpu.intsyscr = 3; // HPE + nesting
+    cpu.mtvec = 0x2000_0003;
+    cpu.mstatus = 0x0088;
+    cpu.priv_mode = Privilege::Machine;
+    cpu.regs[10] = 0x1111_2222;
+
+    // Main loop at 0x100: j 0x100
+    bus.load_flash(0x100, &0x0000_006fu32.to_le_bytes());
+
+    // Low-priority IRQ 12 at 0x200:
+    //   0x200: li a0, 55
+    //   0x204: csrsi mstatus, 8      (re-enable interrupts for nesting)
+    //   0x208: lui a5, 0xe000e
+    //   0x20C: lui a4, 0x20          (1 << 17)
+    //   0x210: sw a4, 0x200(a5)      (pend IRQ 17 in PFIC->IPSR[0])
+    //   0x214: nop
+    //   0x218: csrci mstatus, 8
+    //   0x21C: mret
+    bus.load_flash(0x200, &0x0370_0513u32.to_le_bytes());
+    bus.load_flash(0x204, &0x3004_6073u32.to_le_bytes());
+    bus.load_flash(0x208, &0xe000_e7b7u32.to_le_bytes());
+    bus.load_flash(0x20C, &0x0002_0737u32.to_le_bytes());
+    bus.load_flash(0x210, &0x20e7_a023u32.to_le_bytes());
+    bus.load_flash(0x214, &0x0000_0013u32.to_le_bytes());
+    bus.load_flash(0x218, &0x3004_7073u32.to_le_bytes());
+    bus.load_flash(0x21C, &0x3020_0073u32.to_le_bytes());
+
+    // High-priority IRQ 17 at 0x300:
+    //   0x300: li a0, 77
+    //   0x304: mret
+    bus.load_flash(0x300, &0x04d0_0513u32.to_le_bytes());
+    bus.load_flash(0x304, &0x3020_0073u32.to_le_bytes());
+
+    bus.pfic.write_u8(0x400 + 12, 0x80); // IRQ 12 low priority
+    bus.pfic.write_u8(0x400 + 17, 0x00); // IRQ 17 high priority
+    bus.pfic.write_u32(0x100, (1 << 12) | (1 << 17));
+
+    cpu.pc = 0x100;
+    bus.pfic.set_pending(12);
+    cpu.step(&mut bus); // enter IRQ 12
+    assert_eq!(cpu.pc, 0x200);
+    assert_eq!(cpu.mepc, 0x100);
+
+    for _ in 0..5 {
+        cpu.step(&mut bus); // li, csrsi, lui, lui, sw -> pends IRQ 17
+    }
+    cpu.step(&mut bus); // service_interrupts enters IRQ 17 before nop at 0x214
+    assert_eq!(cpu.pc, 0x300);
+    assert_eq!(cpu.hpe_stack.len(), 2);
+    assert_eq!(cpu.mepc, 0x214);
+
+    cpu.step(&mut bus); // li a0, 77
+    assert_eq!(cpu.regs[10], 77);
+    cpu.step(&mut bus); // inner mret -> returns to 0x214 in IRQ 12 with outer CSRs & a0=55
+    assert_eq!(cpu.pc, 0x214);
+    assert_eq!(cpu.regs[10], 55);
+    assert_eq!(cpu.mepc, 0x100);
+    assert_eq!(cpu.mcause, 0x8000_000C);
+    assert_eq!(cpu.hpe_stack.len(), 1);
+    assert!(!bus.pfic.is_active(17));
+    assert!(bus.pfic.is_active(12));
+
+    cpu.step(&mut bus); // nop
+    cpu.step(&mut bus); // csrci mstatus, 8
+    cpu.step(&mut bus); // outer mret -> returns to main 0x100 with a0=0x1111_2222
+    assert_eq!(cpu.pc, 0x100);
+    assert_eq!(cpu.regs[10], 0x1111_2222);
+    assert_eq!(cpu.priv_mode, Privilege::Machine);
+    assert!(cpu.mie());
+    assert!(cpu.hpe_stack.is_empty());
+    assert!(!bus.pfic.is_active(12));
+}

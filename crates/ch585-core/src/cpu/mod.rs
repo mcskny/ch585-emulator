@@ -240,8 +240,9 @@ pub enum Privilege {
 #[derive(Debug, Clone)]
 pub struct HpeFrame {
     pub regs: [u32; 16], // x1, x5..x7, x10..x17, x28..x31
-    pub mepc: u32,
-    pub mstatus: u32,
+    /// Outer interrupt's `(mepc, mstatus, mcause)` saved when this frame nested inside
+    /// an already-active interrupt; `None` for depth-1 (non-nested) interrupts.
+    pub nested_trap_ctx: Option<(u32, u32, u32)>,
     pub irqn: u8,
 }
 
@@ -267,7 +268,7 @@ pub struct Cpu {
     pub mtval: u32,
 
     // WCH QingKe custom CSRs
-    pub intsyscr: u32, // 0x804: bit0=HWSTKEN, bit1=INESTEN
+    pub intsyscr: u32, // 0x804: bit0=HWSTKEN, bit1=INESTEN, bit5=single-exit HPE pop bypass (auto-cleared on mret)
     pub corecfgr: u32, // 0xBC0
     pub corecfgr2: u32, // 0xBC1
     pub unknown_csrs: Vec<(u16, u32)>,
@@ -525,8 +526,13 @@ impl Cpu {
     }
 
     pub fn enter_interrupt(&mut self, bus: &mut impl Bus, irqn: u8, vtf_addr: Option<u32>) {
-        // Save current state
-        let saved_mstatus = self.mstatus;
+        // Save current state before mutating active_irqs or trap CSRs
+        let was_nested = !self.active_irqs.is_empty();
+        let nested_trap_ctx = if was_nested {
+            Some((self.mepc, self.mstatus, self.mcause))
+        } else {
+            None
+        };
         let saved_mepc = self.pc;
 
         // Clear pending if edge/SW? Note: hardware clears pending or leaves peripheral flag?
@@ -544,8 +550,7 @@ impl Cpu {
             }
             self.hpe_stack.push(HpeFrame {
                 regs: saved_regs,
-                mepc: saved_mepc,
-                mstatus: saved_mstatus,
+                nested_trap_ctx,
                 irqn,
             });
         }
@@ -2138,23 +2143,37 @@ impl Cpu {
                 self.halted_wfi = true;
             }
             Insn::Mret => {
-                // Pop PFIC active IRQ if we are returning from an interrupt handler
-                let popped_irq = if let Some(frame) = self.hpe_stack.last() {
+                let suppress_hpe_pop = (self.intsyscr & (1 << 5)) != 0;
+                let ret_pc = self.mepc;
+                let mpie = (self.mstatus >> 7) & 1;
+                let mpp = (self.mstatus >> 11) & 3;
+                let ret_priv = if mpp == 3 {
+                    Privilege::Machine
+                } else {
+                    Privilege::User
+                };
+
+                // Pop PFIC active IRQ and matching HPE frame (if any)
+                let (popped_irq, nested_ctx) = if let Some(frame) = self.hpe_stack.last() {
                     if self.active_irqs.last().copied() == Some(frame.irqn) {
                         let f = self.hpe_stack.pop().unwrap();
-                        for (slot, &reg_idx) in HPE_REG_MAP.iter().enumerate() {
-                            self.regs[reg_idx] = f.regs[slot];
+                        if !suppress_hpe_pop {
+                            for (slot, &reg_idx) in HPE_REG_MAP.iter().enumerate() {
+                                self.regs[reg_idx] = f.regs[slot];
+                            }
                         }
-                        self.mepc = f.mepc;
-                        self.mstatus = f.mstatus;
                         self.active_irqs.pop();
-                        Some(f.irqn)
+                        (Some(f.irqn), f.nested_trap_ctx)
                     } else {
-                        self.active_irqs.pop()
+                        (self.active_irqs.pop(), None)
                     }
                 } else {
-                    self.active_irqs.pop()
+                    (self.active_irqs.pop(), None)
                 };
+
+                if suppress_hpe_pop {
+                    self.intsyscr &= !(1 << 5);
+                }
 
                 if let Some(irqn) = popped_irq {
                     bus.pfic().set_active(irqn, false);
@@ -2163,33 +2182,24 @@ impl Cpu {
                     }
                 }
                 self.last_popped_irq = popped_irq;
+                self.priv_mode = ret_priv;
 
-                if self.hpe_stack.is_empty() && popped_irq.is_none() {
-                    // Normal MRET (e.g. startup jump to main or non-HPE trap)
-                    let mpie = (self.mstatus >> 7) & 1;
-                    let mpp = (self.mstatus >> 11) & 3;
-                    self.mstatus = (self.mstatus & !((1 << 3) | (3 << 11)))
-                        | (mpie << 3)
-                        | (1 << 7);
-                    self.priv_mode = if mpp == 3 {
-                        Privilege::Machine
+                if !suppress_hpe_pop {
+                    if let Some((outer_mepc, outer_mstatus, outer_mcause)) = nested_ctx {
+                        self.mepc = outer_mepc;
+                        self.mcause = outer_mcause;
+                        self.mstatus = (outer_mstatus & !(1 << 3)) | (mpie << 3);
                     } else {
-                        Privilege::User
-                    };
+                        self.mstatus = (self.mstatus & !((1 << 3) | (3 << 11)))
+                            | (mpie << 3)
+                            | (1 << 7);
+                    }
                 } else {
-                    // Returning from interrupt (with or without HPE)
-                    let mpie = (self.mstatus >> 7) & 1;
-                    let mpp = (self.mstatus >> 11) & 3;
                     self.mstatus = (self.mstatus & !((1 << 3) | (3 << 11)))
                         | (mpie << 3)
                         | (1 << 7);
-                    self.priv_mode = if mpp == 3 {
-                        Privilege::Machine
-                    } else {
-                        Privilege::User
-                    };
                 }
-                *next_pc = self.mepc;
+                *next_pc = ret_pc;
             }
             Insn::Csrrw { rd, rs1, csr } => {
                 let old = self.read_csr(csr);
