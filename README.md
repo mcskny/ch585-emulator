@@ -5,6 +5,9 @@
 
 A fast, **zero-dependency** Rust emulator for the **WCH CH585M** (`QingKe V3C` RV32IMAC + Zba/Zbb/Zbc/Zbs + WCH XW) microcontroller, designed to execute unmodified firmware ELFs faster than real time (`~3–4x+` real time at `62.4 MHz`, including live external board circuits), with a CLI runner, embeddable Rust core, multi-chip RF cluster, and WebAssembly browser UI.
 
+> [!NOTE]
+> **AI-Assisted Development & Hardware Disclaimer:** This emulator was developed with AI assistance and has **not** yet been verified against real physical CH585M silicon. Peripheral semantics, timing, and power estimates are derived from the WCH CH585 datasheet, SDK headers/drivers, and firmware test suites—treat simulation results as pre-silicon behavioral validation rather than a substitute for physical hardware testing (see [`ASSUMPTIONS.md`](ASSUMPTIONS.md)).
+
 ---
 
 ## Features
