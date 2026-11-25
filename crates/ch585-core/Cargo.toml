@@ -1,0 +1,13 @@
+[package]
+name = "ch585-core"
+description = "Zero-dependency emulator core for the WCH CH585M (QingKe V3C RV32IMAC+XW) microcontroller"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]

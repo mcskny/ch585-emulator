@@ -1,0 +1,13 @@
+[package]
+name = "ch585-cli"
+description = "Command-line runner, scenario injector, VCD/JSON reporter, and profiler for ch585-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+ch585-core = { path = "../ch585-core" }
+ch585-boards = { path = "../ch585-boards" }

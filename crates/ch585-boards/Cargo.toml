@@ -1,0 +1,12 @@
+[package]
+name = "ch585-boards"
+description = "External PCB and peripheral board plugins (Macropad v2 Hall/74HC165/Encoder/WS2812/BQ25300) for ch585-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+ch585-core = { path = "../ch585-core" }

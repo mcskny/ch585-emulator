@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ch585-core",
+    "crates/ch585-boards",
+    "crates/ch585-cli",
+    "crates/ch585-wasm",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/mcskny/ch585-emulator"
+homepage = "https://github.com/mcskny/ch585-emulator"
+authors = ["Muhammed Ali Coşkun <mcskny01@gmail.com>"]
+keywords = ["ch585", "riscv", "emulator", "wch", "embedded"]
+categories = ["emulators", "embedded", "hardware-support"]
+
+[profile.release]
+opt-level = 3
+lto = true

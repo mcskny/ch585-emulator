@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Run workspace tests (release)
+        run: cargo test --workspace --release
+
+      - name: Build documentation without warnings
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps
+
+      - name: Build WebAssembly target & verify ABI
+        run: |
+          cargo build -p ch585-wasm --target wasm32-unknown-unknown --release
+          node -e 'const fs=require("fs"); WebAssembly.instantiate(fs.readFileSync("target/wasm32-unknown-unknown/release/ch585_wasm.wasm"), {}).then(({instance}) => { const v = instance.exports.ch585_wasm_abi_version(); console.log("WASM ABI =", v); if (v !== 2) process.exit(1); });'

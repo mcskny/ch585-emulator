@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>CH585M Emulator — RISC-V3C QFN48 Workbench</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a href="#main-workbench" class="skip-link visually-hidden">Skip to workbench</a>
+    <div class="brand">
+      <h1>WCH CH585M Emulator</h1>
+      <span class="brand-tag">QingKe V3C · RV32IMC_Zba_Zbb_Zbc_Zbs_XW · WASM</span>
+    </div>
+
+    <div class="controls-bar">
+      <label class="file-picker" for="elf-file">
+        <span>Load ELF</span>
+        <input id="elf-file" type="file" accept=".elf">
+      </label>
+
+      <button id="btn-run" type="button" class="primary" disabled>Run</button>
+      <button id="btn-step-frame" type="button" disabled>Step 1ms</button>
+      <button id="btn-step-insn" type="button" disabled>Step 1 Cycle</button>
+      <button id="btn-reset" type="button" disabled>Reset</button>
+
+      <div class="form-field">
+        <label for="speed-select">Speed</label>
+        <select id="speed-select">
+          <option value="50">50 us/tick</option>
+          <option value="250">250 us/tick</option>
+          <option value="1000" selected>1 ms/tick</option>
+          <option value="4000">4 ms/tick</option>
+          <option value="10000">10 ms/tick</option>
+        </select>
+      </div>
+    </div>
+  </header>
+
+  <div class="telemetry-strip" aria-live="off">
+    <div class="stat-pill"><span class="stat-label">FW</span> <span id="stat-fw">None</span></div>
+    <div class="stat-pill"><span class="stat-label">PC</span> <span id="stat-pc">0x00000000</span></div>
+    <div class="stat-pill"><span class="stat-label">Mode</span> <span id="stat-mode">M</span></div>
+    <div class="stat-pill"><span class="stat-label">SysClk</span> <span id="stat-clk">0 MHz</span></div>
+    <div class="stat-pill"><span class="stat-label">Time</span> <span id="stat-time">0.00 ms</span></div>
+    <div class="stat-pill"><span class="stat-label">Cycles</span> <span id="stat-cycles">0</span></div>
+    <div class="stat-pill"><span class="stat-label">PFIC En/Pend</span> <span id="stat-irq">0x0 / 0x0</span></div>
+    <div class="stat-pill"><span class="stat-label">UnkMMIO</span> <span id="stat-mmio">0</span></div>
+  </div>
+
+  <main id="main-workbench" class="workbench" tabindex="-1">
+    <div class="col">
+      <section class="panel">
+        <div class="panel-header">
+          <h2>QFN48 Package View (48 Pins)</h2>
+          <span class="panel-hint">Click any PA/PB pin to cycle external drive (Hi-Z -&gt; Low -&gt; High)</span>
+        </div>
+
+        <div id="qfn48-host" class="qfn48-wrap"></div>
+
+        <div class="legend-row">
+          <span class="legend-chip"><span class="swatch swatch-high"></span>HIGH (3.3V)</span>
+          <span class="legend-chip"><span class="swatch swatch-low"></span>LOW (0V)</span>
+          <span class="legend-chip"><span class="swatch swatch-hiz"></span>Hi-Z</span>
+          <span class="legend-chip"><span class="swatch swatch-analog"></span>Analog / ADC</span>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>LEDs &amp; Quick Pin Toggles</h2>
+          <div class="form-row">
+            <button id="btn-pb9-toggle" type="button" disabled>Toggle PB9 (VBUS)</button>
+            <button id="btn-pb4-toggle" type="button" disabled>Toggle PB4</button>
+            <button id="btn-pa0-toggle" type="button" disabled>Toggle PA0</button>
+          </div>
+        </div>
+        <div id="led-grid" class="led-grid"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Logic Analyzer</h2>
+          <div class="form-row">
+            <div class="form-field">
+              <label for="logic-zoom">Zoom</label>
+              <input id="logic-zoom" type="range" min="1" max="16" step="0.5" value="1">
+              <span id="logic-zoom-val" class="mono">1.0x</span>
+            </div>
+            <button id="btn-logic-clear" type="button" disabled>Clear</button>
+          </div>
+        </div>
+        <canvas id="logic-canvas" class="logic-canvas"></canvas>
+        <div id="logic-channel-row" class="logic-channel-row"></div>
+      </section>
+    </div>
+
+    <div class="col">
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Pin Inspector &amp; ADC Signal Generator</h2>
+          <span id="pin-inspect-title" class="badge">No pin selected</span>
+        </div>
+
+        <div id="pin-inspect-details" class="panel-hint mono">
+          Select a pin on the QFN48 diagram to inspect alternate functions and external drive.
+        </div>
+
+        <div class="form-row" id="pin-drive-actions">
+          <button id="btn-pin-float" type="button" disabled>Floating (Z)</button>
+          <button id="btn-pin-low" type="button" disabled>Drive Low (0)</button>
+          <button id="btn-pin-high" type="button" disabled>Drive High (1)</button>
+        </div>
+
+        <div class="form-row">
+          <div class="form-field">
+            <label for="adc-ch">ADC Ch</label>
+            <select id="adc-ch">
+              <option value="0">AIN0 (PA4)</option>
+              <option value="1">AIN1 (PA5)</option>
+              <option value="2">AIN2 (PA12)</option>
+              <option value="3">AIN3 (PA13)</option>
+              <option value="4">AIN4 (PA14)</option>
+              <option value="5">AIN5 (PA15)</option>
+              <option value="6">AIN6 (PA3)</option>
+              <option value="7">AIN7 (PA2)</option>
+              <option value="8">AIN8 (PA1)</option>
+              <option value="9">AIN9 (PA0)</option>
+              <option value="10">AIN10 (PB7)</option>
+              <option value="11">AIN11 (PB6)</option>
+              <option value="12">AIN12 (PA8)</option>
+              <option value="13">AIN13 (PA9)</option>
+            </select>
+          </div>
+
+          <div class="form-field">
+            <label for="adc-mode">Wave</label>
+            <select id="adc-mode">
+              <option value="0">DC Voltage</option>
+              <option value="1">Sine Wave</option>
+              <option value="2">Ramp / Saw</option>
+              <option value="3">Pulse</option>
+            </select>
+          </div>
+
+          <span id="adc-live-mv" class="badge mono">1650 mV</span>
+        </div>
+
+        <div class="form-row">
+          <div class="form-field">
+            <label for="adc-mv-slider">Base / DC (mV)</label>
+            <input id="adc-mv-slider" type="range" min="0" max="3300" step="10" value="1650">
+            <input id="adc-mv-num" type="number" min="0" max="3300" step="10" value="1650">
+          </div>
+
+          <div class="form-field">
+            <label for="adc-p1">Amp / Peak (mV)</label>
+            <input id="adc-p1" type="number" min="0" max="3300" step="50" value="3000">
+          </div>
+
+          <div class="form-field">
+            <label for="adc-p2">Freq (Hz) / Period (ms)</label>
+            <input id="adc-p2" type="number" min="0.1" max="10000" step="1" value="50">
+          </div>
+        </div>
+
+        <div class="form-row">
+          <button id="btn-adc-apply" type="button" disabled>Apply Channel</button>
+          <button id="btn-adc-rest-all" type="button" disabled>All Ch 1650mV (Rest)</button>
+          <button id="btn-adc-key-press" type="button" disabled>Hall Key Press (AIN0/1=2800mV)</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>UART0..3 Serial Terminal</h2>
+          <div class="tablist" role="tablist" aria-label="UART ports">
+            <button type="button" class="tab-btn" role="tab" id="tab-uart-0" aria-selected="true" data-uart="0">UART0</button>
+            <button type="button" class="tab-btn" role="tab" id="tab-uart-1" aria-selected="false" data-uart="1">UART1</button>
+            <button type="button" class="tab-btn" role="tab" id="tab-uart-2" aria-selected="false" data-uart="2">UART2</button>
+            <button type="button" class="tab-btn" role="tab" id="tab-uart-3" aria-selected="false" data-uart="3">UART3</button>
+          </div>
+        </div>
+
+        <pre id="uart-log" class="terminal-box" role="tabpanel" aria-labelledby="tab-uart-0"></pre>
+
+        <div class="form-row">
+          <label for="uart-rx-input">RX Text</label>
+          <input id="uart-rx-input" type="text" placeholder="Type text to send to UART RX...">
+          <button id="btn-uart-send" type="button" disabled>Send RX</button>
+          <button id="btn-uart-clear" type="button">Clear</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>USB 2.0 HS Virtual Host</h2>
+          <div class="form-row">
+            <span id="usb-status-badge" class="badge">Idle</span>
+            <button id="btn-usb-enum" type="button" disabled>Re-Enumerate</button>
+            <button id="btn-usb-clear" type="button" disabled>Clear Pkts</button>
+          </div>
+        </div>
+
+        <div id="usb-desc-info" class="panel-hint mono">
+          VID=---- PID=---- DevAddr=0 CfgDesc=0B HIDReports=0
+        </div>
+
+        <pre id="usb-pkt-log" class="terminal-box"></pre>
+
+        <div class="form-row">
+          <div class="form-field">
+            <label for="usb-ep">EP</label>
+            <select id="usb-ep">
+              <option value="1">EP1 OUT</option>
+              <option value="4" selected>EP4 OUT</option>
+              <option value="2">EP2 OUT</option>
+            </select>
+          </div>
+          <label for="usb-out-hex">Hex Payload</label>
+          <input id="usb-out-hex" type="text" value="57 01 01 42" placeholder="e.g. 57 01 01 42">
+          <button id="btn-usb-send" type="button" disabled>Send OUT (64B)</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>BLE / 2.4G Virtual Bridge</h2>
+          <span id="ble-adv-badge" class="badge">Disabled</span>
+        </div>
+        <div id="ble-meta" class="panel-hint mono">Hooks=0 AdvData=0B ScanRsp=0B</div>
+        <pre id="ble-event-log" class="terminal-box"></pre>
+      </section>
+    </div>
+  </main>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

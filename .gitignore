@@ -1,0 +1,6 @@
+/target/
+/kaynak/
+/build_tests/*.elf
+/web/*.wasm
+*.vcd
+.DS_Store

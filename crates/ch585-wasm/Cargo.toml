@@ -1,0 +1,15 @@
+[package]
+name = "ch585-wasm"
+description = "WebAssembly ABI bindings for running the CH585M emulator in browsers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ch585-core = { path = "../ch585-core" }
