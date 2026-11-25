@@ -33,7 +33,7 @@ A fast, **zero-dependency** Rust emulator for the **WCH CH585M** (`QingKe V3C` R
     - Dynamic device deadlines (`next_event_ns` / `on_time_reached`) honored by both active block budgets and `Sleep` fast-forward.
   - `ch585-boards` includes `MacropadV2Board` (`PB16` ratiometric analog rail, Li-ion divider, `74HC165`, quadrature encoder, `WS2812`/`SK6812` decoder, `BQ25300` charger).
 - **Tooling & Diagnostics**
-  - Timed CLI stimuli (`--at`, `--senaryo`), VCD waveform export (`--vcd`), ELF symbol/ISR/stack profiler (`--profile`), JSON calibration override (`--calibration`), deterministic differential JSON reports (`--json`), and WebAssembly + browser UI (`web/`).
+  - Timed CLI stimuli (`--at`, `--scenario`), VCD waveform export (`--vcd`), ELF symbol/ISR/stack profiler (`--profile`), JSON calibration override (`--calibration`), deterministic differential JSON reports (`--json`), and WebAssembly + browser UI (`web/`).
 
 ---
 
@@ -67,7 +67,7 @@ Common CLI options:
 - `--ms <N>` / `--cycles <N>`: simulation duration
 - `--board macropad_v2`: attach `MacropadV2Board` external hardware model
 - `--pin PB9:high` / `--pull PB0:up` / `--adc 0=1650` / `--adc-noise 5mV`: initial pin & ADC setup
-- `--at 200ms:adc:0=2800` / `--senaryo scenario.json`: timed external stimuli
+- `--at 200ms:adc:0=2800` / `--scenario scenario.json`: timed external stimuli
 - `--usb-full`, `--usb-decode`, `--ble`, `--uart 2`, `--gpio`: inspect decoded output
 - `--vcd trace.vcd` / `--vcd-pins PB10,PB5,PB6`: export IEEE 1364 VCD waveform
 - `--profile`, `--json`, `--exact`, `--calibration cal.json`, `--lse-fail`, `--vdd 3000mV`

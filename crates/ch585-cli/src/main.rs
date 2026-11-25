@@ -30,7 +30,7 @@ fn print_usage() {
          \x20 --adc <ch>:<mv>          Set ADC channel DC voltage in mV (repeatable)\n\
          \x20 --adc-noise [<ch>:]<mv>  Set deterministic ADC noise amplitude in mV\n\
          \x20 --at <time>:<kind>:<spec> Schedule timed event (e.g. 200ms:adc:1=2800, 300ms:reset:pin)\n\
-         \x20 --senaryo <file.json>    Load timed event list from JSON file\n\
+         \x20 --scenario <file.json>   Load timed event list from JSON file\n\
          \x20 --flash-in <file.bin>    Load persistent DataFlash (32KB or 512KB image)\n\
          \x20 --flash-out <file.bin>   Save full 512KB flash image after run\n\
          \x20 --vdd <mv>               Set initial MCU VDD supply voltage in mV (default 3300)\n\
@@ -219,7 +219,7 @@ fn main() {
                     }
                 }
             }
-            "--senaryo" => {
+            "--scenario" | "--senaryo" => {
                 i += 1;
                 let path = args.get(i).unwrap_or_else(|| process::exit(1));
                 let txt = fs::read_to_string(path).unwrap_or_else(|e| {
