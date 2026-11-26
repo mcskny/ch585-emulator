@@ -23,6 +23,7 @@ pub struct Timer {
     pub cycle_pulse: bool,
     pub dma_active_step: bool,
     pwm_rep: u8,
+    irq_dirty: bool,
 }
 
 impl Timer {
@@ -44,6 +45,7 @@ impl Timer {
             cycle_pulse: false,
             dma_active_step: false,
             pwm_rep: 0,
+            irq_dirty: true,
         }
     }
 
@@ -137,7 +139,10 @@ impl Timer {
     pub fn advance_cycles(&mut self, cycles: u64, pfic: &mut Pfic) {
         self.cycle_pulse = false;
         if (self.ctrl_mod & 0x04) == 0 || (self.ctrl_mod & 0x01) != 0 {
-            pfic.sync_level_irq(self.irqn, (self.int_flag & self.inter_en) != 0);
+            if self.irq_dirty {
+                pfic.sync_level_irq(self.irqn, (self.int_flag & self.inter_en) != 0);
+                self.irq_dirty = false;
+            }
             return;
         }
         let end = (self.cnt_end & 0x03FF_FFFF).max(1) as u64;
@@ -150,18 +155,25 @@ impl Timer {
             self.count = next as u32;
         }
         pfic.sync_level_irq(self.irqn, (self.int_flag & self.inter_en) != 0);
+        self.irq_dirty = false;
     }
 
     pub fn step(&mut self, cycles: u32, pfic: &mut Pfic, sram: &mut [u8]) {
         self.cycle_pulse = false;
         self.dma_active_step = false;
         if (self.ctrl_mod & 0x04) == 0 {
-            pfic.sync_level_irq(self.irqn, (self.int_flag & self.inter_en) != 0);
+            if self.irq_dirty {
+                pfic.sync_level_irq(self.irqn, (self.int_flag & self.inter_en) != 0);
+                self.irq_dirty = false;
+            }
             return; // RB_TMR_COUNT_EN = 0
         }
         let mode_in = (self.ctrl_mod & 0x01) != 0;
         if mode_in {
-            pfic.sync_level_irq(self.irqn, (self.int_flag & self.inter_en) != 0);
+            if self.irq_dirty {
+                pfic.sync_level_irq(self.irqn, (self.int_flag & self.inter_en) != 0);
+                self.irq_dirty = false;
+            }
             // Capture/count mode increments on external edges
             return;
         }
@@ -206,6 +218,7 @@ impl Timer {
         }
 
         pfic.sync_level_irq(self.irqn, (self.int_flag & self.inter_en) != 0);
+        self.irq_dirty = false;
     }
 
     pub fn read_u8(&self, offset: u32) -> u8 {
@@ -248,6 +261,7 @@ impl Timer {
     }
 
     pub fn write_u8(&mut self, offset: u32, val: u8) {
+        self.irq_dirty = true;
         match offset {
             0x00 => {
                 self.ctrl_mod = val & !0x02;
@@ -290,6 +304,7 @@ impl Timer {
     }
 
     pub fn write_u32(&mut self, offset: u32, val: u32) {
+        self.irq_dirty = true;
         match offset {
             0x00 => {
                 let b = val.to_le_bytes();

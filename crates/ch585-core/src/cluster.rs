@@ -101,6 +101,10 @@ impl MultiChipCluster {
         &mut self.chips[idx]
     }
 
+    pub fn next_rf_event_ns(&self) -> Option<u64> {
+        self.rf_medium.next_event_ns(self.sim_time_ns, &self.chips)
+    }
+
     pub fn connect_gpio(&mut self, a: GpioPinRef, b: GpioPinRef) {
         self.connect_gpio_with_pull(a, b, ExtPull::None);
     }

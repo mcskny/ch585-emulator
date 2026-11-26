@@ -300,6 +300,38 @@ impl RfState {
         self.mode != RfMode::Idle && (self.bound_active || self.mode == RfMode::BasicRx || self.initialized)
     }
 
+    pub fn has_pending_tx(&self, sram: &[u8]) -> bool {
+        if !self.outbox.is_empty() {
+            return true;
+        }
+        if !matches!(self.mode, RfMode::FastHost | RfMode::FastDevice) || !self.bound_connected {
+            return false;
+        }
+        let start = if self.tx_cur_desc != 0 {
+            self.tx_cur_desc
+        } else {
+            self.tx_ring_head
+        };
+        if !(0x2000_0000..0x2002_0000).contains(&start) {
+            return false;
+        }
+        let mut cur = start;
+        for _ in 0..8 {
+            if !(0x2000_0000..0x2002_0000).contains(&cur) {
+                break;
+            }
+            if (read_u32_sram(sram, cur) & STA_DMA_ENABLE) != 0 {
+                return true;
+            }
+            let next = read_u32_sram(sram, cur.wrapping_add(12));
+            cur = if next != 0 { next } else { self.tx_ring_head };
+            if cur == start {
+                break;
+            }
+        }
+        false
+    }
+
     pub fn log_event(&mut self, time_ns: u64, summary: String) {
         if self.event_log.len() >= 256 {
             self.event_log.drain(0..64);
@@ -714,6 +746,75 @@ impl RfMedium {
             || dev.peer_info == [0; 6]
     }
 
+    /// Earliest nanosecond timestamp at which the RF medium needs another step, or `None` if idle.
+    pub fn next_event_ns(&self, now_ns: u64, chips: &[Ch585Machine]) -> Option<u64> {
+        let mut next: Option<u64> = self.in_flight.iter().map(|f| f.deliver_at_ns).min();
+        if let Some(t) = self.drop_link_at_ns {
+            next = Some(next.map_or(t, |cur| cur.min(t)));
+        }
+        if let Some(t) = self.restore_link_at_ns {
+            next = Some(next.map_or(t, |cur| cur.min(t)));
+        }
+
+        let mut unpaired_hosts = false;
+        for chip in chips.iter() {
+            if !chip.bus.powered {
+                continue;
+            }
+            let rf = &chip.bus.ble.rf;
+            if rf.has_pending_tx(&chip.bus.sram) {
+                return Some(now_ns);
+            }
+            if !self.link_dropped && rf.mode == RfMode::FastHost && rf.bound_active && !rf.bound_connected {
+                unpaired_hosts = true;
+            }
+            if rf.bound_connected {
+                let peer_ok = !self.link_dropped
+                    && rf.peer_chip_id
+                        .and_then(|p| chips.get(p))
+                        .is_some_and(|peer| peer.bus.powered && peer.bus.ble.rf.bound_connected);
+                if !peer_ok {
+                    let deadline = rf
+                        .last_link_ok_ns
+                        .saturating_add((rf.timeout_ms.max(1) as u64).saturating_mul(1_000_000));
+                    next = Some(next.map_or(deadline, |cur| cur.min(deadline)));
+                }
+            } else if rf.mode == RfMode::BasicRx && rf.basic_rx_timeout_us > 0 {
+                let deadline = rf
+                    .basic_rx_start_ns
+                    .saturating_add(rf.basic_rx_timeout_us.saturating_mul(1_000));
+                next = Some(next.map_or(deadline, |cur| cur.min(deadline)));
+            }
+        }
+
+        if unpaired_hosts {
+            for (hi, host) in chips.iter().enumerate() {
+                if !host.bus.powered {
+                    continue;
+                }
+                let h = &host.bus.ble.rf;
+                if !(h.mode == RfMode::FastHost && h.bound_active && !h.bound_connected) {
+                    continue;
+                }
+                for (di, dev) in chips.iter().enumerate() {
+                    if hi == di || !dev.bus.powered {
+                        continue;
+                    }
+                    let d = &dev.bus.ble.rf;
+                    if d.mode == RfMode::FastDevice
+                        && d.bound_active
+                        && !d.bound_connected
+                        && Self::bound_pair_compatible(h, d)
+                    {
+                        return Some(now_ns);
+                    }
+                }
+            }
+        }
+
+        next
+    }
+
     /// Advance 2.4 GHz channel pairing, TX DMA extraction, delayed delivery, faults & timeouts.
     pub fn step(&mut self, now_ns: u64, chips: &mut [Ch585Machine]) {
         if let Some(t) = self.drop_link_at_ns {
@@ -731,82 +832,87 @@ impl RfMedium {
 
         // 1. Pair / reconnect Fast Host <-> Fast Device peers when medium is up
         if !self.link_dropped {
-            let n = chips.len();
-            for hi in 0..n {
-                if !chips[hi].bus.powered {
-                    continue;
-                }
-                let h_ready = {
-                    let rf = &chips[hi].bus.ble.rf;
-                    rf.mode == RfMode::FastHost && rf.bound_active && !rf.bound_connected
-                };
-                if !h_ready {
-                    continue;
-                }
-                for di in 0..n {
-                    if hi == di || !chips[di].bus.powered {
+            let need_pairing = chips
+                .iter()
+                .any(|c| c.bus.powered && c.bus.ble.rf.mode == RfMode::FastHost && c.bus.ble.rf.bound_active && !c.bus.ble.rf.bound_connected);
+            if need_pairing {
+                let n = chips.len();
+                for hi in 0..n {
+                    if !chips[hi].bus.powered {
                         continue;
                     }
-                    let matched = {
-                        let h = &chips[hi].bus.ble.rf;
-                        let d = &chips[di].bus.ble.rf;
-                        d.mode == RfMode::FastDevice
-                            && d.bound_active
-                            && !d.bound_connected
-                            && Self::bound_pair_compatible(h, d)
+                    let h_ready = {
+                        let rf = &chips[hi].bus.ble.rf;
+                        rf.mode == RfMode::FastHost && rf.bound_active && !rf.bound_connected
                     };
-                    if !matched {
+                    if !h_ready {
                         continue;
                     }
-                    let assigned_id = if chips[di].bus.ble.rf.dev_id == RF_BOUND_ID {
-                        0
-                    } else {
-                        chips[di].bus.ble.rf.dev_id
-                    };
-                    let host_info = chips[hi].bus.ble.rf.own_info;
-                    let dev_info = chips[di].bus.ble.rf.own_info;
+                    for di in 0..n {
+                        if hi == di || !chips[di].bus.powered {
+                            continue;
+                        }
+                        let matched = {
+                            let h = &chips[hi].bus.ble.rf;
+                            let d = &chips[di].bus.ble.rf;
+                            d.mode == RfMode::FastDevice
+                                && d.bound_active
+                                && !d.bound_connected
+                                && Self::bound_pair_compatible(h, d)
+                        };
+                        if !matched {
+                            continue;
+                        }
+                        let assigned_id = if chips[di].bus.ble.rf.dev_id == RF_BOUND_ID {
+                            0
+                        } else {
+                            chips[di].bus.ble.rf.dev_id
+                        };
+                        let host_info = chips[hi].bus.ble.rf.own_info;
+                        let dev_info = chips[di].bus.ble.rf.own_info;
 
-                    {
-                        let hb = &mut chips[hi].bus.ble;
-                        hb.rf.bound_connected = true;
-                        hb.rf.peer_chip_id = Some(di);
-                        hb.rf.dev_id = assigned_id;
-                        hb.rf.peer_info = dev_info;
-                        hb.rf.last_link_ok_ns = now_ns;
-                        hb.rf.bound_success_count += 1;
-                        hb.rf.log_event(
-                            now_ns,
-                            format!("RFBound Host paired with chip#{di} (devId={assigned_id})"),
-                        );
-                        hb.rf.queue_bound_cb(
-                            BOUND_STA_SUCCESS,
-                            RF_ROLE_HOST,
-                            assigned_id,
-                            dev_info,
-                            &mut hb.pending_callbacks,
-                        );
+                        {
+                            let hb = &mut chips[hi].bus.ble;
+                            hb.rf.bound_connected = true;
+                            hb.rf.peer_chip_id = Some(di);
+                            hb.rf.dev_id = assigned_id;
+                            hb.rf.peer_info = dev_info;
+                            hb.rf.last_link_ok_ns = now_ns;
+                            hb.rf.bound_success_count += 1;
+                            hb.rf.log_event(
+                                now_ns,
+                                format!("RFBound Host paired with chip#{di} (devId={assigned_id})"),
+                            );
+                            hb.rf.queue_bound_cb(
+                                BOUND_STA_SUCCESS,
+                                RF_ROLE_HOST,
+                                assigned_id,
+                                dev_info,
+                                &mut hb.pending_callbacks,
+                            );
+                        }
+                        {
+                            let db = &mut chips[di].bus.ble;
+                            db.rf.bound_connected = true;
+                            db.rf.peer_chip_id = Some(hi);
+                            db.rf.dev_id = assigned_id;
+                            db.rf.peer_info = host_info;
+                            db.rf.last_link_ok_ns = now_ns;
+                            db.rf.bound_success_count += 1;
+                            db.rf.log_event(
+                                now_ns,
+                                format!("RFBound Device paired with chip#{hi} (devId={assigned_id})"),
+                            );
+                            db.rf.queue_bound_cb(
+                                BOUND_STA_SUCCESS,
+                                RF_ROLE_DEVICE,
+                                assigned_id,
+                                host_info,
+                                &mut db.pending_callbacks,
+                            );
+                        }
+                        break;
                     }
-                    {
-                        let db = &mut chips[di].bus.ble;
-                        db.rf.bound_connected = true;
-                        db.rf.peer_chip_id = Some(hi);
-                        db.rf.dev_id = assigned_id;
-                        db.rf.peer_info = host_info;
-                        db.rf.last_link_ok_ns = now_ns;
-                        db.rf.bound_success_count += 1;
-                        db.rf.log_event(
-                            now_ns,
-                            format!("RFBound Device paired with chip#{hi} (devId={assigned_id})"),
-                        );
-                        db.rf.queue_bound_cb(
-                            BOUND_STA_SUCCESS,
-                            RF_ROLE_DEVICE,
-                            assigned_id,
-                            host_info,
-                            &mut db.pending_callbacks,
-                        );
-                    }
-                    break;
                 }
             }
         }
@@ -867,130 +973,139 @@ impl RfMedium {
         }
 
         // 3. Deliver due in-flight frames
-        let mut remaining = Vec::with_capacity(self.in_flight.len());
-        let due_queue = std::mem::take(&mut self.in_flight);
-        for item in due_queue {
-            if item.deliver_at_ns > now_ns {
-                remaining.push(item);
-                continue;
-            }
-            if self.link_dropped {
-                self.total_dropped_link += 1;
-                self.push_log(RfMediumLogEntry {
-                    time_ns: now_ns,
-                    src_chip: item.src_chip,
-                    dst_chip: item.dst_chip,
-                    freq_khz: item.frame.frequency_khz,
-                    len: item.frame.payload.len(),
-                    outcome: RfDeliveryOutcome::DroppedLinkDown,
-                });
-                continue;
-            }
+        if !self.in_flight.is_empty() {
+            let mut remaining = Vec::with_capacity(self.in_flight.len());
+            let due_queue = std::mem::take(&mut self.in_flight);
+            for item in due_queue {
+                if item.deliver_at_ns > now_ns {
+                    remaining.push(item);
+                    continue;
+                }
+                if self.link_dropped {
+                    self.total_dropped_link += 1;
+                    self.push_log(RfMediumLogEntry {
+                        time_ns: now_ns,
+                        src_chip: item.src_chip,
+                        dst_chip: item.dst_chip,
+                        freq_khz: item.frame.frequency_khz,
+                        len: item.frame.payload.len(),
+                        outcome: RfDeliveryOutcome::DroppedLinkDown,
+                    });
+                    continue;
+                }
 
-            let ch = Self::channel_index(item.frame.frequency_khz);
-            let interf = self.config.channel_interference_dbm[ch].max(0);
-            let rssi_dbm = (self.config.base_rssi_dbm as i32 - (interf as i32 / 2))
-                .clamp(-110, 10) as i8;
-            let crc_err = if interf >= 60 {
-                true
-            } else if interf > 20 {
-                let err_p = ((interf - 20) as f32) / 40.0;
-                self.next_unit_f32() < err_p
-            } else {
-                false
-            };
+                let ch = Self::channel_index(item.frame.frequency_khz);
+                let interf = self.config.channel_interference_dbm[ch].max(0);
+                let rssi_dbm = (self.config.base_rssi_dbm as i32 - (interf as i32 / 2))
+                    .clamp(-110, 10) as i8;
+                let crc_err = if interf >= 60 {
+                    true
+                } else if interf > 20 {
+                    let err_p = ((interf - 20) as f32) / 40.0;
+                    self.next_unit_f32() < err_p
+                } else {
+                    false
+                };
 
-            match item.frame.kind {
-                RfPacketKind::FastData => {
-                    if let Some(dst_idx) = item.dst_chip {
-                        if let Some(dst) = chips.get_mut(dst_idx) {
-                            if dst.bus.powered && dst.bus.ble.rf.bound_connected {
-                                let ble = &mut dst.bus.ble;
-                                let ok = ble.rf.deliver_rx_frame(
-                                    &mut dst.bus.sram,
-                                    &item.frame.payload,
-                                    item.frame.dev_id,
-                                    rssi_dbm,
-                                    crc_err,
-                                    now_ns,
-                                    &mut ble.pending_callbacks,
-                                );
-                                if ok {
-                                    if crc_err {
-                                        self.total_crc_errors += 1;
-                                    } else {
-                                        self.total_delivered += 1;
-                                    }
-                                    self.push_log(RfMediumLogEntry {
-                                        time_ns: now_ns,
-                                        src_chip: item.src_chip,
-                                        dst_chip: Some(dst_idx),
-                                        freq_khz: item.frame.frequency_khz,
-                                        len: item.frame.payload.len(),
-                                        outcome: if crc_err {
-                                            RfDeliveryOutcome::CrcError
+                match item.frame.kind {
+                    RfPacketKind::FastData => {
+                        if let Some(dst_idx) = item.dst_chip {
+                            if let Some(dst) = chips.get_mut(dst_idx) {
+                                if dst.bus.powered && dst.bus.ble.rf.bound_connected {
+                                    let ble = &mut dst.bus.ble;
+                                    let ok = ble.rf.deliver_rx_frame(
+                                        &mut dst.bus.sram,
+                                        &item.frame.payload,
+                                        item.frame.dev_id,
+                                        rssi_dbm,
+                                        crc_err,
+                                        now_ns,
+                                        &mut ble.pending_callbacks,
+                                    );
+                                    if ok {
+                                        if crc_err {
+                                            self.total_crc_errors += 1;
                                         } else {
-                                            RfDeliveryOutcome::Delivered
-                                        },
-                                    });
+                                            self.total_delivered += 1;
+                                        }
+                                        self.push_log(RfMediumLogEntry {
+                                            time_ns: now_ns,
+                                            src_chip: item.src_chip,
+                                            dst_chip: Some(dst_idx),
+                                            freq_khz: item.frame.frequency_khz,
+                                            len: item.frame.payload.len(),
+                                            outcome: if crc_err {
+                                                RfDeliveryOutcome::CrcError
+                                            } else {
+                                                RfDeliveryOutcome::Delivered
+                                            },
+                                        });
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                RfPacketKind::BasicRaw | RfPacketKind::LegacyRaw => {
-                    for (dst_idx, dst) in chips.iter_mut().enumerate() {
-                        if dst_idx == item.src_chip || !dst.bus.powered {
-                            continue;
-                        }
-                        if dst.bus.ble.rf.mode != RfMode::BasicRx {
-                            continue;
-                        }
-                        let freq_match = dst.bus.ble.rf.frequency_khz == 0
-                            || item.frame.frequency_khz == 0
-                            || dst.bus.ble.rf.frequency_khz == item.frame.frequency_khz;
-                        let aa_match = dst.bus.ble.rf.access_address == 0
-                            || item.frame.access_address == 0
-                            || dst.bus.ble.rf.access_address == item.frame.access_address;
-                        if !freq_match || !aa_match {
-                            continue;
-                        }
-                        let ble = &mut dst.bus.ble;
-                        if ble.rf.deliver_rx_frame(
-                            &mut dst.bus.sram,
-                            &item.frame.payload,
-                            0,
-                            rssi_dbm,
-                            crc_err,
-                            now_ns,
-                            &mut ble.pending_callbacks,
-                        ) {
-                            if crc_err {
-                                self.total_crc_errors += 1;
-                            } else {
-                                self.total_delivered += 1;
+                    RfPacketKind::BasicRaw | RfPacketKind::LegacyRaw => {
+                        for (dst_idx, dst) in chips.iter_mut().enumerate() {
+                            if dst_idx == item.src_chip || !dst.bus.powered {
+                                continue;
                             }
-                            self.push_log(RfMediumLogEntry {
-                                time_ns: now_ns,
-                                src_chip: item.src_chip,
-                                dst_chip: Some(dst_idx),
-                                freq_khz: item.frame.frequency_khz,
-                                len: item.frame.payload.len(),
-                                outcome: if crc_err {
-                                    RfDeliveryOutcome::CrcError
+                            if dst.bus.ble.rf.mode != RfMode::BasicRx {
+                                continue;
+                            }
+                            let freq_match = dst.bus.ble.rf.frequency_khz == 0
+                                || item.frame.frequency_khz == 0
+                                || dst.bus.ble.rf.frequency_khz == item.frame.frequency_khz;
+                            let aa_match = dst.bus.ble.rf.access_address == 0
+                                || item.frame.access_address == 0
+                                || dst.bus.ble.rf.access_address == item.frame.access_address;
+                            if !freq_match || !aa_match {
+                                continue;
+                            }
+                            let ble = &mut dst.bus.ble;
+                            if ble.rf.deliver_rx_frame(
+                                &mut dst.bus.sram,
+                                &item.frame.payload,
+                                0,
+                                rssi_dbm,
+                                crc_err,
+                                now_ns,
+                                &mut ble.pending_callbacks,
+                            ) {
+                                if crc_err {
+                                    self.total_crc_errors += 1;
                                 } else {
-                                    RfDeliveryOutcome::Delivered
-                                },
-                            });
+                                    self.total_delivered += 1;
+                                }
+                                self.push_log(RfMediumLogEntry {
+                                    time_ns: now_ns,
+                                    src_chip: item.src_chip,
+                                    dst_chip: Some(dst_idx),
+                                    freq_khz: item.frame.frequency_khz,
+                                    len: item.frame.payload.len(),
+                                    outcome: if crc_err {
+                                        RfDeliveryOutcome::CrcError
+                                    } else {
+                                        RfDeliveryOutcome::Delivered
+                                    },
+                                });
+                            }
                         }
                     }
                 }
             }
+            self.in_flight = remaining;
         }
-        self.in_flight = remaining;
 
         // 4. Refresh keepalives and check Fast/Bound & BasicRx timeouts
-        let mut peers_alive = vec![false; chips.len()];
+        let mut peers_alive_buf = [false; 16];
+        let mut peers_alive_vec = Vec::new();
+        let peers_alive: &mut [bool] = if chips.len() <= peers_alive_buf.len() {
+            &mut peers_alive_buf[..chips.len()]
+        } else {
+            peers_alive_vec.resize(chips.len(), false);
+            &mut peers_alive_vec
+        };
         if !self.link_dropped {
             for (idx, chip) in chips.iter().enumerate() {
                 if !chip.bus.powered || !chip.bus.ble.rf.bound_connected {

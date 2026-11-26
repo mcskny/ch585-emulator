@@ -502,10 +502,11 @@ impl SysBus {
             return;
         }
         self.total_cycles += cycles as u64;
-        let sys_hz = self.sys.sys_clk_hz().max(32_000);
-        let num = (self.time_ns_rem as u128) + (cycles as u128) * 1_000_000_000u128;
-        let dt = ((num / (sys_hz as u128)) as u64).max(1);
-        self.time_ns_rem = (num % (sys_hz as u128)) as u64;
+        let sys_hz = self.sys.sys_clk_hz().max(32_000) as u64;
+        let num = self.time_ns_rem + (cycles as u64) * 1_000_000_000u64;
+        let dt = (num / sys_hz).max(1);
+        self.time_ns_rem = num % sys_hz;
+        let sys_hz = sys_hz as u32;
         self.total_time_ns += dt;
         self.accumulate_power_ns(dt, self.power_mode);
 
@@ -1590,7 +1591,7 @@ impl Ch585Machine {
             && !self.bus.skip_input_sync_once
             && !(self.cpu.pc == crate::cpu::CALLBACK_RET_SENTINEL
                 && !self.cpu.callback_stack.is_empty())
-            && !(self.bus.ble.has_hooks() && self.bus.ble.in_hook_range(self.cpu.pc))
+            && !(self.bus.ble.has_hooks() && self.bus.ble.has_hook_at(self.cpu.pc))
         {
             let pending_irq = self.bus.pfic.pick_pending_irq(self.cpu.nesting_enabled());
             let will_enter_irq =
@@ -1634,7 +1635,7 @@ impl Ch585Machine {
                     .run_profiled_batch(&mut self.bus, &mut self.profiler, 1, has_ble);
                 (c, true)
             }
-        } else if self.bus.ble.has_hooks() && self.bus.ble.in_hook_range(self.cpu.pc) {
+        } else if self.bus.ble.has_hooks() && self.bus.ble.has_hook_at(self.cpu.pc) {
             let mut flash_dirty = false;
             let stubbed = self.bus.ble.on_pc(
                 &mut self.cpu,
@@ -1744,12 +1745,16 @@ impl Ch585Machine {
             .bits();
         self.bus.mmio_sync_requested = false;
 
-        let sys_hz = self.bus.sys.sys_clk_hz().max(32_000) as u128;
+        let sys_hz = self.bus.sys.sys_clk_hz().max(32_000) as u64;
         let ns_to_max_cycles = |delta_ns: u64| -> u32 {
             if delta_ns == 0 {
                 return 1;
             }
-            let c = ((delta_ns as u128) * sys_hz) / 1_000_000_000u128;
+            if delta_ns < 200_000_000_000u64 {
+                let c = (delta_ns * sys_hz) / 1_000_000_000u64;
+                return c.clamp(1, u32::MAX as u64) as u32;
+            }
+            let c = ((delta_ns as u128) * (sys_hz as u128)) / 1_000_000_000u128;
             (c.clamp(1, u32::MAX as u128)) as u32
         };
 

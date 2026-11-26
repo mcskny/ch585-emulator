@@ -815,7 +815,7 @@ impl Cpu {
                 }
                 continue;
             }
-            if ble_has_hooks && bus.ble.in_hook_range(self.pc) {
+            if ble_has_hooks && bus.ble.has_hook_at(self.pc) {
                 let extra = bus.pending_periph_cycles;
                 let (stubbed, _) = self.eval_ble_hook(bus, extra);
                 if stubbed {
@@ -911,7 +911,7 @@ impl Cpu {
                 }
                 continue;
             }
-            if ble_has_hooks && bus.ble.in_hook_range(self.pc) {
+            if ble_has_hooks && bus.ble.has_hook_at(self.pc) {
                 let extra = bus.pending_periph_cycles;
                 let (stubbed, _) = self.eval_ble_hook(bus, extra);
                 if stubbed {
@@ -1021,14 +1021,17 @@ impl Cpu {
             return false;
         }
 
+        if ble_has_hooks && bus.ble.has_hook_at(start_pc) {
+            return false;
+        }
+
         let mut blk = CachedBlock::EMPTY;
         blk.tag_pc = start_pc;
         let mut cur_pc = start_pc;
         let mut len = 0usize;
-        let single_ble_step = ble_has_hooks && bus.ble.in_hook_range(start_pc);
 
         while len < MAX_BLOCK_OPS {
-            if len > 0 && ble_has_hooks && bus.ble.in_hook_range(cur_pc) {
+            if len > 0 && ble_has_hooks && bus.ble.has_hook_at(cur_pc) {
                 break;
             }
             let decoded = if in_flash {
@@ -1312,7 +1315,7 @@ impl Cpu {
             blk.ops[len] = fop;
             len += 1;
             cur_pc = next_pc;
-            if is_term || single_ble_step {
+            if is_term {
                 break;
             }
         }
@@ -1425,7 +1428,7 @@ impl Cpu {
         }
 
         'outer: while ran < budget {
-            if ble_has_hooks && bus.ble.in_hook_range(pc) {
+            if ble_has_hooks && bus.ble.has_hook_at(pc) {
                 self.regs = regs;
                 self.pc = pc;
                 let saved_instret = self.instret;

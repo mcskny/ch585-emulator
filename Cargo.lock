@@ -4,14 +4,14 @@ version = 4
 
 [[package]]
 name = "ch585-boards"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ch585-core",
 ]
 
 [[package]]
 name = "ch585-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ch585-boards",
  "ch585-core",
@@ -19,11 +19,11 @@ dependencies = [
 
 [[package]]
 name = "ch585-core"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "ch585-wasm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ch585-core",
 ]

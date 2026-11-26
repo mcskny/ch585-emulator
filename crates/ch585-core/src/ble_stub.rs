@@ -212,6 +212,8 @@ pub struct BleBridge {
     last_observed: Option<(u32, u64)>,
     min_pc: u32,
     max_pc: u32,
+    hook_bloom: [u64; 64],
+    hook_table: Vec<(u32, BleHookKind)>,
 }
 
 impl Default for BleBridge {
@@ -258,6 +260,8 @@ impl BleBridge {
             last_observed: None,
             min_pc: u32::MAX,
             max_pc: 0,
+            hook_bloom: [0; 64],
+            hook_table: Vec::new(),
         }
     }
 
@@ -274,6 +278,51 @@ impl BleBridge {
     #[inline]
     pub fn in_hook_range(&self, pc: u32) -> bool {
         !self.hooks.is_empty() && pc >= self.min_pc && pc <= self.max_pc
+    }
+
+    #[inline(always)]
+    fn bloom_slot(pc: u32) -> (usize, u64) {
+        let bit = ((pc >> 1) & 4095) as usize;
+        (bit >> 6, 1u64 << (bit & 63))
+    }
+
+    #[inline(always)]
+    pub fn has_hook_at(&self, pc: u32) -> bool {
+        if self.hooks.is_empty() {
+            return false;
+        }
+        if self.hooks.len() != self.hook_table.len() {
+            return self.hooks.contains_key(&pc);
+        }
+        if pc < self.min_pc || pc > self.max_pc {
+            return false;
+        }
+        let (word, mask) = Self::bloom_slot(pc);
+        if (self.hook_bloom[word] & mask) == 0 {
+            return false;
+        }
+        self.hook_table.binary_search_by_key(&pc, |&(a, _)| a).is_ok()
+    }
+
+    #[inline]
+    pub fn lookup_hook(&self, pc: u32) -> Option<BleHookKind> {
+        if self.hooks.is_empty() {
+            return None;
+        }
+        if self.hooks.len() != self.hook_table.len() {
+            return self.hooks.get(&pc).cloned();
+        }
+        if pc < self.min_pc || pc > self.max_pc {
+            return None;
+        }
+        let (word, mask) = Self::bloom_slot(pc);
+        if (self.hook_bloom[word] & mask) == 0 {
+            return None;
+        }
+        self.hook_table
+            .binary_search_by_key(&pc, |&(a, _)| a)
+            .ok()
+            .map(|idx| self.hook_table[idx].1.clone())
     }
 
     #[inline]
@@ -315,6 +364,8 @@ impl BleBridge {
 
     pub fn resolve_symbols(&mut self, addr_by_sym: &HashMap<String, u32>) {
         self.hooks.clear();
+        self.hook_bloom = [0; 64];
+        self.hook_table.clear();
         self.last_observed = None;
         self.min_pc = u32::MAX;
         self.max_pc = 0;
@@ -384,11 +435,16 @@ impl BleBridge {
         ];
         for (name, kind) in map {
             if let Some(&addr) = addr_by_sym.get(name) {
-                self.hooks.insert(addr, kind);
+                self.hooks.insert(addr, kind.clone());
+                let (word, mask) = Self::bloom_slot(addr);
+                self.hook_bloom[word] |= mask;
+                self.hook_table.push((addr, kind));
                 self.min_pc = self.min_pc.min(addr);
                 self.max_pc = self.max_pc.max(addr);
             }
         }
+        self.hook_table.sort_unstable_by_key(|&(a, _)| a);
+        self.hook_table.dedup_by_key(|entry| entry.0);
     }
 
     fn next_tag(&mut self, prefix: u32) -> u32 {
@@ -1073,13 +1129,10 @@ impl BleBridge {
         flash_dirty: &mut bool,
     ) -> bool {
         let pc = cpu.pc;
-        if self.hooks.is_empty() || pc < self.min_pc || pc > self.max_pc {
-            return false;
-        }
         if self.last_observed == Some((pc, cpu.instret)) {
             return false;
         }
-        let Some(kind) = self.hooks.get(&pc).cloned() else {
+        let Some(kind) = self.lookup_hook(pc) else {
             return false;
         };
         self.last_observed = Some((pc, cpu.instret));

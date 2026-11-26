@@ -71,6 +71,7 @@ pub struct Adc {
     pub pin_source_ohm: [u32; 14],
     hold_cap_mv: f64,
     pub dma_active_step: bool,
+    irq_dirty: bool,
 }
 
 impl Default for Adc {
@@ -113,6 +114,7 @@ impl Adc {
             pin_source_ohm: [0; 14],
             hold_cap_mv: 0.0,
             dma_active_step: false,
+            irq_dirty: true,
         }
     }
 
@@ -460,6 +462,12 @@ impl Adc {
         sram: &mut [u8],
     ) {
         self.dma_active_step = false;
+        if !self.converting && (self.ctrl_dma & 0x80) == 0 {
+            if self.irq_dirty {
+                self.sync_irq(pfic);
+            }
+            return;
+        }
         // Auto-DMA periodic trigger
         if (self.ctrl_dma & 0x80) != 0 && !self.converting {
             let period = ((256u32 - self.auto_cycle as u32).max(1)) * 16;
@@ -541,11 +549,12 @@ impl Adc {
         }
     }
 
-    fn sync_irq(&self, pfic: &mut Pfic) {
+    fn sync_irq(&mut self, pfic: &mut Pfic) {
         let eoc = (self.int_flag & 0x80) != 0;
         let dma_end = (self.ctrl_dma & 0x08) != 0 && (self.dma_if & 0x08) != 0;
         let scan_end = (self.scan_cfg2 & (1 << 29)) != 0 && (self.scan_cfg2 & (1 << 31)) != 0;
         pfic.sync_level_irq(irq::ADC, eoc || dma_end || scan_end);
+        self.irq_dirty = false;
     }
 
     fn start_conversion(&mut self) {
@@ -582,6 +591,7 @@ impl Adc {
     }
 
     pub fn write_u8(&mut self, offset: u32, val: u8) {
+        self.irq_dirty = true;
         match offset {
             0x54 => self.tkey_count = val,
             0x56 => {
@@ -674,6 +684,7 @@ impl Adc {
     }
 
     pub fn write_u32(&mut self, offset: u32, val: u32) {
+        self.irq_dirty = true;
         match offset {
             0x64 => self.dma_now = val,
             0x68 => {
